@@ -1,0 +1,15 @@
+[package]
+name = "qwise"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Audio File I/O
+hound = "3.5"
+
+# Fast Fourier Transform (no_std compatible)
+microfft = "0.6"
+
+# Complex number support
+num-complex = "0.4"
+
