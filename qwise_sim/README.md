@@ -4,63 +4,60 @@ Q-WiSE is an ultra-low-consumption speech enhancement framework designed for the
 
 The project addresses **dAIEdge Challenge \#3**, targeting energy-efficient, real-time denoising for audio-based multimodal applications (e.g., drone surveillance, smart warehouses) with power budgets strictly under.
 
-## **🚀 Key Features**
+## Q-WiSE: Neural-Guided Wiener Filter Algorithm
 
-* **Neural-Guided Wiener Filter:** Combines traditional signal processing interpretability with adaptive AI-driven gain parameterization.
-* **Rust-Native DSP Pipeline:** A high-performance, no\_std compatible audio processing core utilizing microfft and num-complex.
-* **Dual-Output Architecture:** Simultaneously produces enhanced audio and a classification metadata matrix for environment awareness.
-* **Ultra-Low Latency:** Optimized for 256-sample frames to meet the requirements of real-time multi-modal edge systems.
-* **Hardware Agnostic Simulation:** Validated on Linux (Fedora/Ubuntu) with a clear path to deployment on **ESP32-S3**, **Nordic nRF53**, and **STM32 MP1**.
+The Q-WiSE framework implements a frequency-domain speech enhancement pipeline. Unlike traditional Wiener filters that 
+rely on statistical SNR estimation, Q-WiSE uses a Neural-Guided approach where a quantized AI core (Mamba/Transformer) predicts 
+the ideal gain maps.
 
-## **🏗 System Architecture**
+The core objective is to estimate a clean speech signal $S(t)$ from a noisy observation $X(t) = S(t) + N(t)$. 
+In the frequency domain, the Wiener filter provides an optimal gain $G(f)$ to minimize the mean square error:
 
-The Q-WiSE framework utilizes a hybrid approach between Deep Learning and Classical Signal Processing:
+$$Y(f) = X(f) \cdot G(f)$$
 
-1. **Windowing:** A Hann window is applied to each sample frame to minimize spectral leakage:
-2. **Forward FFT:** Converting time-domain PCM to complex frequency bins.
-3. **Neural-Guided Gain Prediction:** A quantized AI core (Transformer/Mamba hybrid) predicts a time-frequency gain map.
-4. **Filtering Stage:** The enhanced spectrum is calculated as:
-5. **Inverse FFT:** Reconstructing audio via the Conjugate-FFT-Conjugate method for maximum efficiency on fixed-point hardware.
-6. **Metadata Extraction:** The AI core's secondary head identifies noise types (e.g., "Drone Rotor", "Wind") and outputs a classification matrix.
+Where:
+- $X(f)$ is the Short-Time Fourier Transform (STFT) of the noisy signal.
+- $G(f)$ is the gain map predicted by the AI core, constrained to $0 \le G(f) \le 1$.
+- $Y(f)$ is the estimated clean speech spectrum.
 
-## **🛠 Prerequisites**
+### Step 1: Framing and Windowing
+To prevent spectral leakage at the frame boundaries, we apply a Hann Window to each $256$-sample frame ($N=256$):
 
-* **Rust Toolchain:** Stable Rust (Edition 2021/2024).
-* **System Libraries:** Standard development tools for cross-compilation if targeting ARM/Xtensa.
-* **Input Audio:** Mono/Multi-channel .wav files.
+$$w(n) = 0.5 \left( 1 - \cos \left( \frac{2\pi n}{N-1} \right) \right)$$
 
-## **📦 Installation & Setup**
+### Step 2: Short-Time Fourier Transform (STFT)
+We convert the real-valued time-domain signal into the complex frequency domain using a Fast Fourier Transform.
 
-1. **Initialize Project:**  
-   git clone \<repository-url\>  
-   cd qwise\_sim  
-   mkdir \-p data/input data/output
+$$X(k) = \sum_{n=0}^{N-1} x(n) w(n) e^{-j\frac{2\pi}{N}nk}$$
 
-2. **Add Dependencies:** Ensure your Cargo.toml includes hound, microfft, and num-complex.
-3. **Build:**  
-   cargo build \--release
+### Step 3: Neural Gain Application
+This is the "Neural-Guided" innovation. The AI core (Mamba/Transformer) analyzes the noisy features and produces a real-valued 
+mask $G(k)$. We perform point-wise complex multiplication:
 
-## **💻 Usage & Benchmarking**
+$$\text{Re}\{Y(k)\} = \text{Re}\{X(k)\} \cdot G(k)$$
 
-Run the simulation to process noisy audio datasets:
+$$\text{Im}\{Y(k)\} = \text{Im}\{X(k)\} \cdot G(k)$$
 
-cargo run \-- data/input/noisy\_sample.wav data/output/clean\_sample.wav
+This approach suppresses noise while preserving the original phase of the speech signal, which is critical for perceptual quality.
 
-### **Performance Metrics**
+### Step 4: Inverse FFT via Conjugate Symmetry
+Because the microfft crate is optimized for bare-metal and only provides a forward transform, 
+we implement the Inverse FFT (IFFT) using the Conjugate-FFT-Conjugate method:
 
-The system is evaluated against the following benchmarks:
+- Conjugate: $Z(k) = \text{conj}(Y(k))$
+- Forward FFT: $z(n) = \text{FFT}(Z(k))$
+- Final Conjugate & Scale: $y(n) = \frac{1}{N} \text{conj}(z(n))$
 
-* **PESQ:** Perceptual Evaluation of Speech Quality.
-* **STOI:** Short-Time Objective Intelligibility.
-* **SNR Improvement:** Signal-to-Noise Ratio gain.
-* **Power Profiling:** Target using the Nordic Power Profiler Kit II.
+### Step 5: Synthesis and Normalization
+The resulting real part of the complex buffer is extracted as the clean PCM audio. We normalize the floating-point samples 
+back to the 16-bit integer range ($i16$) for output:
 
-## **📂 Project Structure**
+$$\text{sample}_{i16} = \text{clamp}(y(n) \cdot 32767, -32768, 32767)$$
 
-* src/main.rs: Core Wiener filter logic, FFT pipeline, and CLI entry point.
-* data/: Directory for input/output datasets (LibriSpeech/VoxCeleb).
-* Cargo.toml: Project manifest.
-* models/: (Planned) Storage for Quantized INT8 ONNX models.
+### Step 6: Metadata Matrix Output
+
+Simultaneously, the secondary head of the AI model outputs a $4 \times 4$ classification matrix. This represents the 
+environmental context (e.g., Drone Rotor vs. Human Speech), enabling the system to provide multimodal awareness alongside audio enhancement.
 
 ## **📅 Roadmap (7-Month Plan)**
 
