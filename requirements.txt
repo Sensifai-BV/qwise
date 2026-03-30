@@ -1,0 +1,9 @@
+torch==2.4.0
+torchaudio==2.4.0
+onnxruntime>=1.16.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+packaging>=23.0
+onnx>=1.16.0
+onnxsim>=0.6.0
+soundfile>=0.12.0
