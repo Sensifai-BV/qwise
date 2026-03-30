@@ -159,5 +159,5 @@ def inspect_onnx_model(model_path: str) -> None:
 
 
 if __name__ == "__main__":
-    path = "../model/qwise_int8.onnx"
+    path = "model/qwise_vad_int8.onnx"
     inspect_onnx_model(path)
