@@ -56,8 +56,7 @@ logger = get_logger(__name__)
 
 SCRIPT_DIR   = Path(__file__).parent.resolve()
 HPARAMS_FILE = SCRIPT_DIR / "hparams" / "train.yaml"
-HFC_DIR      = SCRIPT_DIR / "hfc"
-SAVE_DIR     = SCRIPT_DIR / "CRDNN_VAD" / "save"
+SAVE_DIR     = SCRIPT_DIR / "speechbrain" / "CRDNN_VAD" / "save"
 SILERO_ONNX_DEFAULT = SCRIPT_DIR / "silero-vad" / "src" / "silero_vad" / "data" / "silero_vad.onnx"
 BOUNDARY_MARKER = 1.0
 
@@ -221,52 +220,34 @@ def load_vad_model(device: str = "cpu", ckpt_tag: str = "hfc") -> Dict:
         ``"epoch_91"``   – local checkpoint CKPT+epoch_91
         ``"epoch_100"``  – local checkpoint CKPT+epoch_100
     """
-    if ckpt_tag == "hfc":
-        # ── Load from the HuggingFace-style pretrained dir ──
-        hparams_file = HFC_DIR / "hyperparams.yaml"
-        with open(hparams_file, encoding="utf-8") as fh:
-            hparams = load_hyperpyyaml(fh)
+    # ── Load from a specific local checkpoint ──
+    overrides = {
+        "data_folder": "/tmp",
+        "musan_folder": "/tmp",
+        "commonlanguage_folder": "/tmp",
+        "output_folder": "/tmp",
+    }
+    with open(HPARAMS_FILE, encoding="utf-8") as fh:
+        hparams = load_hyperpyyaml(fh, overrides)
 
-        model         = hparams["model"]
-        mean_var_norm = hparams["mean_var_norm"]
+    model = hparams["model"]
+    mean_var_norm = hparams["mean_var_norm"]
 
-        # Use Pretrainer to load model.ckpt + normalizer.ckpt
-        from speechbrain.utils.parameter_transfer import Pretrainer
-        pretrainer = Pretrainer(
-            loadables={"model": model, "mean_var_norm": mean_var_norm},
-        )
-        pretrainer.collect_files(default_source=str(HFC_DIR))
-        pretrainer.load_collected()
-        logger.info(f"Loaded HuggingFace pretrained model from {HFC_DIR}")
-    else:
-        # ── Load from a specific local checkpoint ──
-        overrides = {
-            "data_folder":           "/tmp",
-            "musan_folder":          "/tmp",
-            "commonlanguage_folder": "/tmp",
-            "output_folder":         "/tmp",
-        }
-        with open(HPARAMS_FILE, encoding="utf-8") as fh:
-            hparams = load_hyperpyyaml(fh, overrides)
+    ckpt_dir = SAVE_DIR / f"CKPT+{ckpt_tag}"
+    if not ckpt_dir.exists():
+        raise RuntimeError(f"Checkpoint dir not found: {ckpt_dir}")
 
-        model         = hparams["model"]
-        mean_var_norm = hparams["mean_var_norm"]
-
-        ckpt_dir = SAVE_DIR / f"CKPT+{ckpt_tag}"
-        if not ckpt_dir.exists():
-            raise RuntimeError(f"Checkpoint dir not found: {ckpt_dir}")
-
-        # Load specific checkpoint by filtering with ckpt_predicate
-        ckpt = Checkpointer(
-            checkpoints_dir=str(SAVE_DIR),
-            recoverables={"model": model, "normalizer": mean_var_norm},
-        )
-        chosen = ckpt.recover_if_possible(
-            ckpt_predicate=lambda c: str(ckpt_dir) in str(c.path),
-        )
-        if chosen is None:
-            raise RuntimeError(f"Could not recover checkpoint from {ckpt_dir}")
-        logger.info(f"Loaded local checkpoint: {chosen.path}")
+    # Load specific checkpoint by filtering with ckpt_predicate
+    ckpt = Checkpointer(
+        checkpoints_dir=str(SAVE_DIR),
+        recoverables={"model": model, "normalizer": mean_var_norm},
+    )
+    chosen = ckpt.recover_if_possible(
+        ckpt_predicate=lambda c: str(ckpt_dir) in str(c.path),
+    )
+    if chosen is None:
+        raise RuntimeError(f"Could not recover checkpoint from {ckpt_dir}")
+    logger.info(f"Loaded local checkpoint: {chosen.path}")
 
     model.eval().to(device)
     mean_var_norm.to(device)
@@ -274,12 +255,12 @@ def load_vad_model(device: str = "cpu", ckpt_tag: str = "hfc") -> Dict:
 
     return {
         "compute_features": hparams["compute_features"],
-        "mean_var_norm":    mean_var_norm,
-        "cnn":              hparams["cnn"],
-        "rnn":              hparams["rnn"],
-        "dnn":              hparams["dnn"],
-        "sample_rate":      int(hparams["sample_rate"]),
-        "time_resolution":  float(hparams["time_resolution"]),
+        "mean_var_norm": mean_var_norm,
+        "cnn": hparams["cnn"],
+        "rnn": hparams["rnn"],
+        "dnn": hparams["dnn"],
+        "sample_rate": int(hparams["sample_rate"]),
+        "time_resolution": float(hparams["time_resolution"]),
     }
 
 
@@ -955,9 +936,8 @@ def parse_args():
                    default=SILERO_ONNX_DEFAULT,
                    help="Path to Silero VAD ONNX model file")
     p.add_argument("--ckpt", default="hfc",
-                   choices=["hfc", "epoch_91", "epoch_100"],
+                   choices=["epoch_91", "epoch_100"],
                    help="Which SpeechBrain checkpoint to use: "
-                        "hfc = HuggingFace pretrained, "
                         "epoch_91 = local CKPT+epoch_91, "
                         "epoch_100 = local CKPT+epoch_100 (default: hfc)")
     p.add_argument("--activation_th",   type=float, default=0.5)
