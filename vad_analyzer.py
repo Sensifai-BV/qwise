@@ -55,7 +55,7 @@ from speechbrain.utils.logger import get_logger
 logger = get_logger(__name__)
 
 SCRIPT_DIR   = Path(__file__).parent.resolve()
-HPARAMS_FILE = SCRIPT_DIR / "hparams" / "train.yaml"
+HPARAMS_FILE = SCRIPT_DIR / "speechbrain" / "recipes" / "LibriParty" / "VAD" / "hparams" / "train.yaml"
 SAVE_DIR     = SCRIPT_DIR / "speechbrain" / "CRDNN_VAD" / "save"
 SILERO_ONNX_DEFAULT = SCRIPT_DIR / "silero-vad" / "src" / "silero_vad" / "data" / "silero_vad.onnx"
 BOUNDARY_MARKER = 1.0
@@ -935,11 +935,11 @@ def parse_args():
     p.add_argument("--silero_model_path", type=Path,
                    default=SILERO_ONNX_DEFAULT,
                    help="Path to Silero VAD ONNX model file")
-    p.add_argument("--ckpt", default="hfc",
+    p.add_argument("--ckpt", default="epoch_100",
                    choices=["epoch_91", "epoch_100"],
                    help="Which SpeechBrain checkpoint to use: "
                         "epoch_91 = local CKPT+epoch_91, "
-                        "epoch_100 = local CKPT+epoch_100 (default: hfc)")
+                        "epoch_100 = local CKPT+epoch_100 (default: epoch_100)")
     p.add_argument("--activation_th",   type=float, default=0.5)
     p.add_argument("--deactivation_th", type=float, default=0.25)
     p.add_argument("--close_th",        type=float, default=0.25)

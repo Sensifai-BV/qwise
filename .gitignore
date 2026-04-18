@@ -209,3 +209,6 @@ __marimo__/
 # dataset
 datasets/*
 !datasets/README.md
+
+# test
+test/*
