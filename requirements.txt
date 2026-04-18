@@ -44,7 +44,6 @@ nodeenv==1.10.0
 numba==0.65.0
 numpy==2.2.6
 onnxruntime==1.23.2
-packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1769093650/work
 pandas==2.3.3
 pathspec==1.0.4
 pillow==12.2.0
