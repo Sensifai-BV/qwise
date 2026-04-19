@@ -18,34 +18,40 @@ from safetensors.torch import load_model
 # ---------------------------------------------------------------------------
 class SileroVAD16k(nn.Module):
     """
-    Architecture reverse-engineered from the safetensors key map:
-        stft_conv   : Conv1d(1, 258, 256)          – learnt STFT
-        conv1       : Conv1d(129, 128, 3, pad=1)   – after mag spectrum
-        conv2       : Conv1d(128, 64,  3, pad=1)
-        conv3       : Conv1d(64,  64,  3, pad=1)
-        conv4       : Conv1d(64,  128, 3, pad=1)
-        lstm_cell   : LSTMCell(128, 128)
-        final_conv  : Conv1d(128, 1, 1)             + sigmoid
-    Input : (batch, 576)   =  64 context + 512 new samples
-    Output: (batch, 1)     speech probability
+    Architecture reverse-engineered from the JIT model and safetensors weights.
+
+    STFT front-end:
+        ReflectionPad1d(0, 64) → Conv1d(1, 258, 256, stride=128) → split → magnitude
+    Encoder (4 × Conv1d + ReLU, SE is identity):
+        conv1: Conv1d(129, 128, 3, pad=1) → ReLU
+        conv2: Conv1d(128, 64,  3, pad=1) → ReLU
+        conv3: Conv1d(64,  64,  3, pad=1) → ReLU
+        conv4: Conv1d(64,  128, 3, pad=1) → ReLU
+    Decoder:
+        LSTMCell(128, 128)
+        h → unsqueeze(-1) → Dropout(0.1) → ReLU → Conv1d(128, 1, 1) → Sigmoid
+    Output:
+        squeeze(1) → mean(dim=1) → unsqueeze(1) → squeeze → scalar
     """
 
     def __init__(self):
         super().__init__()
-        # Learnt STFT front-end (real + imag → 258 channels)
-        self.stft_conv = nn.Conv1d(1, 258, kernel_size=256, stride=1, bias=False)
+        # Learnt STFT front-end
+        self.stft_pad = nn.ReflectionPad1d((0, 64))
+        self.stft_conv = nn.Conv1d(1, 258, kernel_size=256, stride=128, bias=False)
 
-        # Encoder convolutions (operate on magnitude spectrum, 129 bins)
-        self.conv1 = nn.Conv1d(129, 128, 3, padding=1)
-        self.conv2 = nn.Conv1d(128, 64, 3, padding=1)
-        self.conv3 = nn.Conv1d(64, 64, 3, padding=1)
-        self.conv4 = nn.Conv1d(64, 128, 3, padding=1)
+        # Encoder convolutions
+        self.conv1 = nn.Conv1d(129, 128, 3, stride=1, padding=1)
+        self.conv2 = nn.Conv1d(128, 64, 3, stride=2, padding=1)
+        self.conv3 = nn.Conv1d(64, 64, 3, stride=2, padding=1)
+        self.conv4 = nn.Conv1d(64, 128, 3, stride=1, padding=1)
 
         # Recurrent bottleneck
         self.lstm_cell = nn.LSTMCell(128, 128)
 
-        # Output head
+        # Decoder head: Dropout → ReLU → Conv1d → Sigmoid
         self.final_conv = nn.Conv1d(128, 1, 1)
+        self.decoder_dropout = nn.Dropout(0.1)
 
     # ---- helpers for streaming state ----------------------------------
     def reset_states(self, batch_size: int = 1):
@@ -92,27 +98,40 @@ class SileroVAD16k(nn.Module):
             c = torch.zeros(B, 128, device=x.device)
 
         # --- Learnt STFT -----------------------------------------------
-        x = x.unsqueeze(1)                             # (B, 1, 576)
-        x = self.stft_conv(x)                          # (B, 258, T')
+        x = self.stft_pad(x)                           # (B, 576+64=640)
+        x = x.unsqueeze(1)                             # (B, 1, 640)
+        x = self.stft_conv(x)                          # (B, 258, T') stride=128
         # split into real / imag and take magnitude
-        real, imag = x[:, :129, :], x[:, 129:, :]
-        x = torch.sqrt(real ** 2 + imag ** 2 + 1e-8)  # (B, 129, T')
+        cutoff = 129  # filter_length // 2 + 1
+        real = x[:, :cutoff, :]
+        imag = x[:, cutoff:, :]
+        x = torch.sqrt(real.pow(2) + imag.pow(2))     # (B, 129, T')
 
-        # --- Encoder convolutions ---------------------------------------
+        # --- Encoder convolutions (+ ReLU) -----------------------------
         x = F.relu(self.conv1(x))                      # (B, 128, T')
         x = F.relu(self.conv2(x))                      # (B, 64, T')
         x = F.relu(self.conv3(x))                      # (B, 64, T')
         x = F.relu(self.conv4(x))                      # (B, 128, T')
 
-        # Global average pool → (B, 128)
-        x = x.mean(dim=-1)
+        # Squeeze last dim (encoder output → decoder input)
+        x = x.squeeze(-1)                              # (B, 128) if T'==1, else pool
+
+        # If T' > 1, we need global pool to get (B, 128)
+        if x.dim() == 3:
+            x = x.mean(dim=-1)
 
         # --- LSTM cell --------------------------------------------------
         h, c = self.lstm_cell(x, (h, c))
 
-        # --- Output head ------------------------------------------------
-        out = self.final_conv(h.unsqueeze(-1))          # (B, 1, 1)
-        prob = torch.sigmoid(out).squeeze(-1).squeeze(-1)  # (B,)
+        # --- Decoder head -----------------------------------------------
+        x = h.unsqueeze(-1).float()                     # (B, 128, 1)
+        x = self.decoder_dropout(x)                     # Dropout(0.1)
+        x = F.relu(x)                                  # ReLU
+        x = self.final_conv(x)                          # (B, 1, 1)
+        x = torch.sigmoid(x)                            # Sigmoid
+
+        # Output: squeeze(1) → mean(dim=1) → scalar
+        prob = x.squeeze(1).mean(dim=-1)                # (B,)
 
         # pack state
         new_state = torch.stack([h, c])                 # (2, B, 128)
@@ -123,10 +142,38 @@ class SileroVAD16k(nn.Module):
 # ---------------------------------------------------------------------------
 # 2.  Load pre-trained weights
 # ---------------------------------------------------------------------------
-def load_silero_vad_pt(safetensors_path: str = "silero-vad/src/silero_vad/data/silero_vad_16k.safetensors",
+def load_silero_vad_pt(source: str = "silero-vad/src/silero_vad/data/silero_vad.jit",
                        device: str = "cpu") -> SileroVAD16k:
+    """Load weights into reconstructed SileroVAD16k.
+
+    Supports two sources:
+      - .jit file  → extracts weights from the JIT _model (16k sub-model)
+      - .safetensors file → loads directly (keys must match)
+    """
     model = SileroVAD16k()
-    load_model(model, safetensors_path)
+
+    if source.endswith(".jit"):
+        jit = torch.jit.load(source, map_location=device)
+        m = jit._model
+        state = {}
+        state['stft_conv.weight'] = m.stft.forward_basis_buffer.data
+        for i, name in enumerate(['conv1', 'conv2', 'conv3', 'conv4']):
+            layer = getattr(m.encoder, str(i)).reparam_conv
+            state[f'{name}.weight'] = layer.weight.data
+            state[f'{name}.bias'] = layer.bias.data
+        state['lstm_cell.weight_ih'] = m.decoder.rnn.weight_ih.data
+        state['lstm_cell.weight_hh'] = m.decoder.rnn.weight_hh.data
+        state['lstm_cell.bias_ih'] = m.decoder.rnn.bias_ih.data
+        state['lstm_cell.bias_hh'] = m.decoder.rnn.bias_hh.data
+        fc = getattr(m.decoder.decoder, '2')
+        state['final_conv.weight'] = fc.weight.data
+        state['final_conv.bias'] = fc.bias.data
+        model.load_state_dict(state, strict=False)
+    elif source.endswith(".safetensors"):
+        load_model(model, source)
+    else:
+        raise ValueError(f"Unsupported source format: {source}")
+
     model.to(device)
     model.eval()
     model.reset_states()
