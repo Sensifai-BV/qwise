@@ -35,15 +35,18 @@ def plot_result(noisy: torch.Tensor, clean: torch.Tensor,
     import matplotlib.pyplot as plt
     import numpy as np
 
-    fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [1, 0.5, 1, 1]})
 
     t_noisy = np.arange(noisy.shape[-1]) / sr
     t_clean = np.arange(clean.shape[-1]) / sr
 
+    # 1) Noisy waveform
     axes[0].plot(t_noisy, noisy.squeeze().numpy(), linewidth=0.3)
     axes[0].set_ylabel("Amplitude")
     axes[0].set_title("Noisy input")
+    axes[0].set_xlim(0, t_noisy[-1])
 
+    # 2) VAD probabilities
     probs = vad_probs.squeeze().numpy()
     t_vad = np.linspace(0, noisy.shape[-1] / sr, len(probs))
     axes[1].fill_between(t_vad, probs, alpha=0.6, color="orange")
@@ -51,12 +54,26 @@ def plot_result(noisy: torch.Tensor, clean: torch.Tensor,
     axes[1].set_ylabel("Speech prob")
     axes[1].set_ylim(0, 1.05)
     axes[1].set_title("VAD probabilities")
-    axes[1].legend()
+    axes[1].legend(loc="upper right")
+    axes[1].set_xlim(0, t_noisy[-1])
 
-    axes[2].plot(t_clean, clean.squeeze().numpy(), linewidth=0.3, color="green")
-    axes[2].set_ylabel("Amplitude")
-    axes[2].set_xlabel("Time (s)")
-    axes[2].set_title("Enhanced output")
+    # 3) Noisy spectrogram
+    n_fft = 512
+    noisy_np = noisy.squeeze().numpy()
+    axes[2].specgram(noisy_np, NFFT=n_fft, Fs=sr, noverlap=n_fft//2,
+                     cmap='magma', vmin=-80, vmax=0)
+    axes[2].set_ylabel("Freq (Hz)")
+    axes[2].set_title("Noisy spectrogram")
+    axes[2].set_xlim(0, t_noisy[-1])
+
+    # 4) Enhanced spectrogram
+    clean_np = clean.squeeze().numpy()
+    axes[3].specgram(clean_np, NFFT=n_fft, Fs=sr, noverlap=n_fft//2,
+                     cmap='magma', vmin=-80, vmax=0)
+    axes[3].set_ylabel("Freq (Hz)")
+    axes[3].set_xlabel("Time (s)")
+    axes[3].set_title("Enhanced spectrogram")
+    axes[3].set_xlim(0, t_noisy[-1])
 
     plt.tight_layout()
     if save_path:
