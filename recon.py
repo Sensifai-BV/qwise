@@ -5,11 +5,9 @@ recon.py – Reconstruct Silero VAD 16 kHz from safetensors, then provide:
   3. ONNX export
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 from safetensors.torch import load_model
 
 
@@ -185,24 +183,33 @@ def load_silero_vad_pt(source: str = "silero-vad/src/silero_vad/data/silero_vad.
 # ---------------------------------------------------------------------------
 class WienerFilter(nn.Module):
     """
-    Spectral Wiener-like filter.
-    Given a noisy STFT and a per-frame speech-presence mask (from VAD),
-    estimates the clean speech STFT.
+    Decision-directed Wiener filter with recursive noise estimation.
 
-    H(f) = |S(f)|² / (|S(f)|² + |N(f)|²)
+    Unlike simple spectral subtraction, this uses:
+      1. Recursive noise PSD tracking — adapts to non-stationary noise
+         (e.g. drone noise) by updating the noise estimate every frame,
+         controlled by the VAD speech probability.
+      2. Decision-directed a-priori SNR — smooths the SNR estimate across
+         frames to suppress musical-noise artefacts.
+      3. Proper Wiener gain  H = ξ / (ξ + 1)  where ξ = a-priori SNR.
+      4. Gain floor to avoid complete nulling of low-energy bins.
 
-    Noise PSD is estimated from non-speech frames; speech+noise PSD from
-    speech frames.  A learnable over-subtraction `alpha` and spectral
-    floor `beta` are added for fine-tuning flexibility.
+    Learnable parameters (for optional fine-tuning):
+        alpha_s   – noise tracking speed  (higher = slower adaptation)
+        dd_alpha  – decision-directed smoothing  (higher = more temporal smoothing)
+        gain_min  – spectral floor (dB)
     """
 
-    def __init__(self, n_fft: int = 512, hop_length: int = 256):
+    def __init__(self, n_fft: int = 512, hop_length: int = 128,
+                 alpha_s: float = 0.95, dd_alpha: float = 0.98,
+                 gain_min_db: float = -25.0):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
-        # Learnable parameters for fine-tuning the filter
-        self.alpha = nn.Parameter(torch.tensor(1.0))   # over-subtraction
-        self.beta = nn.Parameter(torch.tensor(0.02))   # spectral floor
+        # Learnable parameters
+        self.alpha_s = nn.Parameter(torch.tensor(alpha_s))    # noise smoothing
+        self.dd_alpha = nn.Parameter(torch.tensor(dd_alpha))  # decision-directed
+        self.gain_min_db = nn.Parameter(torch.tensor(gain_min_db))  # spectral floor
 
     def forward(self, noisy_wav: torch.Tensor,
                 vad_mask: torch.Tensor) -> torch.Tensor:
@@ -210,8 +217,7 @@ class WienerFilter(nn.Module):
         Parameters
         ----------
         noisy_wav : (B, T)  time-domain noisy signal
-        vad_mask  : (B, F)  per-frame binary/soft speech mask  (0=noise, 1=speech)
-                    F = number of STFT frames
+        vad_mask  : (B, F)  per-chunk VAD probability (0=noise, 1=speech)
 
         Returns
         -------
@@ -220,28 +226,58 @@ class WienerFilter(nn.Module):
         # STFT
         window = torch.hann_window(self.n_fft, device=noisy_wav.device)
         X = torch.stft(noisy_wav, self.n_fft, self.hop_length,
-                        window=window, return_complex=True)  # (B, freq, frames)
+                        window=window, return_complex=True)   # (B, F, T)
 
-        power = X.abs() ** 2                                # (B, F_bins, frames)
+        B, Freq, T = X.shape
+        power = X.abs().pow(2)                                # (B, Freq, T)
 
-        # Align vad_mask length to STFT frames
-        n_frames = power.shape[-1]
-        if vad_mask.shape[-1] != n_frames:
-            vad_mask = F.interpolate(vad_mask.unsqueeze(1).float(),
-                                     size=n_frames, mode='nearest').squeeze(1)
+        # --- Align VAD mask to STFT frames --------------------------
+        if vad_mask.shape[-1] != T:
+            vad_mask = F.interpolate(
+                vad_mask.unsqueeze(1).float(), size=T, mode='linear',
+                align_corners=False
+            ).squeeze(1)                                      # (B, T)
 
-        speech_mask = (vad_mask > 0.5).unsqueeze(1)          # (B, 1, frames)
-        noise_mask = ~speech_mask
+        # Clamp learnable params to valid ranges
+        alpha_s  = torch.clamp(self.alpha_s,  0.8, 0.99)
+        dd_alpha = torch.clamp(self.dd_alpha, 0.8, 0.995)
+        gain_min = 10.0 ** (torch.clamp(self.gain_min_db, -40.0, -6.0) / 20.0)
 
-        # Estimate noise PSD from non-speech frames
-        noise_count = noise_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)
-        noise_psd = (power * noise_mask.float()).sum(dim=-1, keepdim=True) / noise_count  # (B, F_bins, 1)
+        # --- Recursive noise PSD estimation -------------------------
+        # Initialise noise PSD from first few frames (assume start is noise)
+        n_init = max(1, min(5, T))
+        noise_psd = power[:, :, :n_init].mean(dim=-1)        # (B, Freq)
 
-        # Wiener gain
-        gain = torch.clamp(1.0 - self.alpha * noise_psd / (power + 1e-8),
-                           min=self.beta.abs())               # (B, F_bins, frames)
+        # Pre-allocate gain
+        gain = torch.zeros_like(power)                        # (B, Freq, T)
+        prev_gain = torch.zeros(B, Freq, device=X.device)    # for DD smoothing
 
-        # Apply
+        for t in range(T):
+            frame_power = power[:, :, t]                      # (B, F)
+            speech_prob = vad_mask[:, t].unsqueeze(-1)        # (B, 1)
+
+            # Update noise PSD: fast update in noise, slow in speech
+            # α_adapt = α_s when speech, (1-speech_prob)*α_s when noise
+            alpha_t = alpha_s * speech_prob + (1.0 - speech_prob) * 0.5
+            noise_psd = alpha_t * noise_psd + (1.0 - alpha_t) * frame_power
+
+            # A-posteriori SNR
+            gamma = frame_power / (noise_psd + 1e-10)        # (B, F)
+
+            # Decision-directed a-priori SNR
+            xi_ml = torch.clamp(gamma - 1.0, min=0.0)
+            # Smooth with previous frame's clean estimate
+            xi = dd_alpha * prev_gain.pow(2) * gamma + (1.0 - dd_alpha) * xi_ml
+            xi = torch.clamp(xi, min=1e-4)
+
+            # Wiener gain:  H = ξ / (ξ + 1)
+            G = xi / (xi + 1.0)
+            G = torch.clamp(G, min=gain_min)
+
+            gain[:, :, t] = G
+            prev_gain = G
+
+        # Apply gain and reconstruct
         Y = X * gain
         clean = torch.istft(Y, self.n_fft, self.hop_length,
                             window=window, length=noisy_wav.shape[-1])
