@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-VAD 4-Panel Evaluation – NOIZEUS Dataset
-=========================================
+VAD Multi-Panel Evaluation – NOIZEUS Dataset
+=============================================
 
 Panels (per file):
   1 – Clean waveform (blue)
   2 – Noisy waveform (red)
-  3 – VAD binary detection (0=noise, 1=speech) – step plot
-  4 – Ground-Truth VAD binary (0=noise, 1=speech) – step plot
+  3 – Silero VAD (orange)       [if enabled]
+  4 – SpeechBrain VAD (green)   [if enabled]
+  5 – SincQDR-VAD (purple)      [if enabled]
+  6 – Ground-Truth VAD (dark green)
 
 Ground truth is derived from the **clean audio energy envelope**
 (not from running the neural VAD on the clean file).
@@ -15,15 +17,16 @@ Ground truth is derived from the **clean audio energy envelope**
 Also produces:
   - Aggregated confusion matrix PNG
   - Per-SNR summary table (printed + saved as CSV)
-  - When --model both: comparison confusion matrix for both models
 
 Usage:
-    python test2.py \
+    python vad_analyzer.py \
         --input_dir  /path/to/noizeus_dataset \
         [--output_dir ./cm_output] \
         [--device cpu] \
-        [--model speechbrain|silero|both] \
+        [--model speechbrain|silero|sincqdr|both|all] \
+        [--no_speechbrain] [--no_silero] [--no_sincqdr] \
         [--silero_model_path ./silero-vad/src/silero_vad/data/silero_vad.onnx] \
+        [--sincqdr_ckpt_path ./SincQDR-VAD/ckpt/sincqdr_vad.ckpt] \
         [--activation_th   0.5] \
         [--deactivation_th 0.25] \
         [--close_th        0.250] \
@@ -57,8 +60,15 @@ logger = get_logger(__name__)
 SCRIPT_DIR   = Path(__file__).parent.resolve()
 HPARAMS_FILE = SCRIPT_DIR / "speechbrain" / "recipes" / "LibriParty" / "VAD" / "hparams" / "train.yaml"
 SAVE_DIR     = SCRIPT_DIR / "speechbrain" / "CRDNN_VAD" / "save"
-SILERO_ONNX_DEFAULT = SCRIPT_DIR / "silero-vad" / "src" / "silero_vad" / "data" / "silero_vad.onnx"
+SILERO_ONNX_DEFAULT  = SCRIPT_DIR / "silero-vad" / "src" / "silero_vad" / "data" / "silero_vad.onnx"
+SINCQDR_CKPT_DEFAULT = SCRIPT_DIR / "SincQDR-VAD" / "ckpt" / "sincqdr_vad.ckpt"
 BOUNDARY_MARKER = 1.0
+
+# SincQDR-VAD hyper-parameters (must match training config)
+SINCQDR_WINDOW_SIZE = 0.63   # seconds  (training used 0.63)
+SINCQDR_OVERLAP     = 0.875  # fraction
+SINCQDR_SR          = 16000
+SINCQDR_MEDIAN_K    = 7
 
 RE_CLEAN = re.compile(r"^(sp\d+)\.wav$",               re.IGNORECASE)
 RE_NOISY = re.compile(r"^(sp\d+)_(.+?)_sn(\d+)\.wav$", re.IGNORECASE)
@@ -470,6 +480,136 @@ def run_silero_vad(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# SincQDR-VAD loading & inference
+# ────────────────────────────────────────────────────────────────────────────
+def load_sincqdr_model(ckpt_path: Path, device: str = "cpu"):
+    """Load SincQDR-VAD model from a .ckpt file."""
+    sincqdr_dir = SCRIPT_DIR / "SincQDR-VAD"
+    if str(sincqdr_dir) not in sys.path:
+        sys.path.insert(0, str(sincqdr_dir))
+    from model.sincqdrvad import SincQDRVAD  # noqa: PLC0415
+
+    model = SincQDRVAD(
+        in_channels=1,
+        hidden_channels=32,
+        out_channels=64,
+        patch_size=8,
+        num_blocks=2,
+        sinc_conv=True,
+    )
+    state = torch.load(str(ckpt_path), map_location=device)
+    # checkpoint may be raw state_dict or wrapped
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    model.load_state_dict(state)
+    model.eval().to(device)
+    logger.info(f"SincQDR-VAD model loaded from {ckpt_path}")
+    return model
+
+
+def run_sincqdr_vad(
+    model,
+    path: Path,
+    act: float,
+    deact: float,
+    close: float,
+    lth: float,
+    device: str = "cpu",
+    window_size: float = SINCQDR_WINDOW_SIZE,
+    overlap: float = SINCQDR_OVERLAP,
+    median_k: int = SINCQDR_MEDIAN_K,
+) -> Tuple[torch.Tensor, float]:
+    """
+    Run SincQDR-VAD on an audio file using a sliding window.
+    Returns (boundaries, total_duration_seconds).
+    """
+    import torchaudio
+
+    wav, sr = torchaudio.load(str(path))
+    if wav.ndim > 1 and wav.size(0) > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    if sr != SINCQDR_SR:
+        wav = torchaudio.transforms.Resample(sr, SINCQDR_SR)(wav)
+        sr = SINCQDR_SR
+    wav = wav.squeeze(0)  # (num_samples,)
+    total_dur = wav.shape[0] / sr
+
+    win_samples = int(window_size * sr)
+    hop_samples = int(win_samples * (1.0 - overlap))
+    hop_samples = max(1, hop_samples)
+
+    # Pad so every window is fully filled
+    if wav.shape[0] < win_samples:
+        wav = torch.nn.functional.pad(wav, (0, win_samples - wav.shape[0]))
+
+    probs = []
+    timestamps = []  # centre time of each window
+    with torch.no_grad():
+        start = 0
+        while start + win_samples <= wav.shape[0]:
+            chunk = wav[start: start + win_samples].unsqueeze(0).unsqueeze(0).to(device)  # (1,1,T)
+            p = model.predict(chunk)
+            probs.append(p.squeeze().item())
+            timestamps.append((start + win_samples / 2) / sr)
+            start += hop_samples
+        # last partial window
+        if start < wav.shape[0]:
+            chunk = wav[start:].unsqueeze(0).unsqueeze(0)
+            pad_len = win_samples - chunk.shape[-1]
+            chunk = torch.nn.functional.pad(chunk, (0, pad_len)).to(device)
+            p = model.predict(chunk)
+            probs.append(p.squeeze().item())
+            timestamps.append((start + (wav.shape[0] - start) / 2) / sr)
+
+    # Median smoothing
+    if median_k > 1 and len(probs) >= median_k:
+        probs_t = torch.tensor(probs).unsqueeze(0).unsqueeze(0)  # (1,1,N)
+        pad_k = median_k // 2
+        probs_t = torch.nn.functional.pad(probs_t, (pad_k, pad_k), mode="reflect")
+        smoothed = []
+        for i in range(len(probs)):
+            window_vals = probs_t[0, 0, i: i + median_k]
+            smoothed.append(float(window_vals.median()))
+        probs = smoothed
+
+    # Hysteresis threshold → binary labels
+    triggered = False
+    speech_frames = []
+    for p in probs:
+        if not triggered:
+            triggered = p >= act
+        else:
+            if p < deact:
+                triggered = False
+        speech_frames.append(triggered)
+
+    # Convert to boundaries using per-window timestamps
+    boundaries = []
+    in_speech = False
+    start_t = 0.0
+    for i, is_sp in enumerate(speech_frames):
+        t_start_win = timestamps[i] - (win_samples / 2) / sr
+        t_end_win   = timestamps[i] + (win_samples / 2) / sr
+        if is_sp and not in_speech:
+            start_t = max(0.0, t_start_win)
+            in_speech = True
+        elif not is_sp and in_speech:
+            boundaries.append([start_t, min(total_dur, t_end_win)])
+            in_speech = False
+    if in_speech:
+        boundaries.append([start_t, total_dur])
+
+    if boundaries:
+        b = torch.FloatTensor(boundaries)
+        b = merge_close(b, close)
+        b = remove_short(b, lth)
+    else:
+        b = torch.zeros(0, 2)
+
+    return b, total_dur
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Frame labels & confusion metrics
 # ────────────────────────────────────────────────────────────────────────────
 def boundaries_to_frame_labels(boundaries: torch.Tensor, n: int, tr: float) -> np.ndarray:
@@ -563,16 +703,46 @@ def _annotate_segments(ax, boundaries, total_dur):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 4-Panel Plot  (panels 3 & 4 are binary 0/1 step functions)
+# Flexible N-Panel Plot  (panels 1–2 are waveforms, middle are VAD models, last is GT)
 # ────────────────────────────────────────────────────────────────────────────
-def plot_4panel(
+
+# Per-model colours
+C_SILERO    = "#FF6F00"
+C_SINCQDR   = "#6A1B9A"
+
+
+def _draw_vad_panel(ax, boundaries, dur, color, title, x_max, annotate=False):
+    t, y = boundaries_to_step(boundaries, dur)
+    ax.fill_between(t, y, step="mid", color=color, alpha=0.5)
+    ax.fill_between(t, 1 - y, step="mid", color=C_NOISE_FILL, alpha=0.25)
+    ax.plot(t, y, color=color, linewidth=1.2, drawstyle="steps-mid")
+    ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
+    ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
+    ax.set_ylabel("VAD Output", fontsize=9)
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=4)
+    ax.set_facecolor("white")
+    ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
+    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+    if annotate:
+        _annotate_segments(ax, boundaries, dur)
+
+
+def plot_panels(
     spk, noise, snr_level,
     clean_path, noisy_path,
-    gt_b, pred_b,
-    audio_dur, pred_dur,
-    output_dir,
-    model_name: str = "SpeechBrain",
+    gt_b, audio_dur,
+    model_results: List[Dict],   # list of {name, color, boundaries, dur, panel_num}
+    output_dir: Path,
 ) -> Path:
+    """
+    Generic multi-panel plot.
+    model_results: list of dicts with keys name, color, boundaries, dur
+    Panels:
+      1 – clean waveform
+      2 – noisy waveform
+      3..N-1 – VAD models (in order given)
+      N – Ground-Truth
+    """
     clean_wav, c_sr = load_mono_np(clean_path)
     noisy_wav, n_sr = load_mono_np(noisy_path)
 
@@ -581,12 +751,20 @@ def plot_4panel(
     x_max = max(t_clean[-1] if len(t_clean) else 0,
                 t_noisy[-1] if len(t_noisy) else 0)
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 9),
-                             gridspec_kw={"height_ratios": [1, 1, 0.7, 0.7]})
-    fig.patch.set_facecolor("white")
-    plt.subplots_adjust(hspace=0.45, top=0.91, bottom=0.08, left=0.07, right=0.97)
+    n_model_panels = len(model_results)
+    n_panels = 2 + n_model_panels + 1  # waveforms + models + GT
 
-    # ── Panel 1: Clean waveform ──
+    h_ratios = [1, 1] + [0.7] * n_model_panels + [0.7]
+    fig_h = 3 + 2.2 * n_model_panels
+
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, fig_h),
+                             gridspec_kw={"height_ratios": h_ratios})
+    fig.patch.set_facecolor("white")
+    plt.subplots_adjust(hspace=0.50, top=0.93, bottom=0.07, left=0.07, right=0.97)
+
+    sp_d, si_d = duration_stats(gt_b, audio_dur)
+
+    # Panel 1 – Clean
     ax = axes[0]
     ax.plot(t_clean, clean_wav, color=C_CLEAN, linewidth=0.4, alpha=0.9)
     ax.set_xlim(0, x_max); ax.set_ylim(-1.1, 1.1)
@@ -594,12 +772,11 @@ def plot_4panel(
     ax.set_title("Panel 1 – Clean Audio Signal", fontsize=10, fontweight="bold", pad=4)
     ax.set_facecolor(C_BG)
     ax.axhline(0, color="#999", lw=0.4)
-    sp_d, si_d = duration_stats(gt_b, audio_dur)
     ax.text(0.99, 0.95, f"Duration: {audio_dur:.2f}s  |  GT speech: {sp_d:.2f}s  silence: {si_d:.2f}s",
             transform=ax.transAxes, ha="right", va="top", fontsize=7.5, color="#444")
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
 
-    # ── Panel 2: Noisy waveform ──
+    # Panel 2 – Noisy
     ax = axes[1]
     ax.plot(t_noisy, noisy_wav, color=C_NOISY, linewidth=0.4, alpha=0.9)
     ax.set_xlim(0, x_max); ax.set_ylim(-1.1, 1.1)
@@ -610,32 +787,25 @@ def plot_4panel(
     ax.axhline(0, color="#999", lw=0.4)
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
 
-    # ── Panel 3: SpeechBrain VAD detection (binary 0/1) ──
-    ax = axes[2]
-    t_pred, y_pred = boundaries_to_step(pred_b, pred_dur)
-    ax.fill_between(t_pred, y_pred, step="mid", color=C_SPEECH, alpha=0.5, label="Speech")
-    ax.fill_between(t_pred, 1 - y_pred, step="mid", color=C_NOISE_FILL, alpha=0.25)
-    ax.plot(t_pred, y_pred, color=C_SPEECH, linewidth=1.2, drawstyle="steps-mid")
-    ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
-    ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
-    ax.set_ylabel("VAD Output", fontsize=9)
-    ax.set_title(f"Panel 3 – {model_name} VAD Detection (on noisy audio)",
-                 fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor("white")
-    ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-    _annotate_segments(ax, pred_b, pred_dur)
+    # Model panels
+    for idx, mres in enumerate(model_results):
+        panel_num = 3 + idx
+        ax = axes[2 + idx]
+        _draw_vad_panel(ax, mres["boundaries"], mres["dur"], mres["color"],
+                        f"Panel {panel_num} – {mres['name']} VAD Detection (on noisy audio)",
+                        x_max, annotate=True)
 
-    # ── Panel 4: Ground-Truth VAD (binary 0/1) ──
-    ax = axes[3]
+    # GT panel (last)
+    gt_panel_num = 3 + n_model_panels
+    ax = axes[-1]
     t_gt, y_gt = boundaries_to_step(gt_b, audio_dur)
-    ax.fill_between(t_gt, y_gt, step="mid", color=C_GT_SPEECH, alpha=0.45, label="Speech")
+    ax.fill_between(t_gt, y_gt, step="mid", color=C_GT_SPEECH, alpha=0.45)
     ax.fill_between(t_gt, 1 - y_gt, step="mid", color=C_GT_NOISE, alpha=0.15)
     ax.plot(t_gt, y_gt, color=C_GT_SPEECH, linewidth=1.2, drawstyle="steps-mid")
     ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
     ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
     ax.set_ylabel("VAD Output", fontsize=9)
-    ax.set_title("Panel 4 – Ground-Truth VAD (energy-based from clean audio)",
+    ax.set_title(f"Panel {gt_panel_num} – Ground-Truth VAD (energy-based from clean audio)",
                  fontsize=10, fontweight="bold", pad=4)
     ax.set_facecolor("white")
     ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
@@ -643,19 +813,22 @@ def plot_4panel(
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
     _annotate_segments(ax, gt_b, audio_dur)
 
-    # ── Suptitle ──
+    # Suptitle
     fig.suptitle(
         f"VAD Analysis  –  {spk.upper()}  |  {noise.capitalize()} noise  |  {snr_level} dB SNR",
-        fontsize=12, fontweight="bold", y=0.97)
+        fontsize=12, fontweight="bold", y=0.99)
 
-    # ── Legend ──
-    legend_handles = [
-        mpatches.Patch(color=C_SPEECH, alpha=0.55, label="Predicted: Speech"),
+    # Legend
+    legend_handles = []
+    for mres in model_results:
+        legend_handles.append(mpatches.Patch(color=mres["color"], alpha=0.55, label=f"{mres['name']}: Speech"))
+    legend_handles += [
         mpatches.Patch(color=C_NOISE_FILL, alpha=0.35, label="Predicted: Noise"),
-        mpatches.Patch(color=C_GT_SPEECH, alpha=0.55, label="GT: Speech"),
-        mpatches.Patch(color=C_GT_NOISE, alpha=0.35, label="GT: Noise/Silence"),
+        mpatches.Patch(color=C_GT_SPEECH,  alpha=0.55, label="GT: Speech"),
+        mpatches.Patch(color=C_GT_NOISE,   alpha=0.35, label="GT: Noise/Silence"),
     ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=4, fontsize=8.5,
+    fig.legend(handles=legend_handles, loc="lower center",
+               ncol=min(len(legend_handles), 5), fontsize=8.5,
                framealpha=0.9, bbox_to_anchor=(0.5, 0.002))
 
     out = output_dir / f"{spk}_{noise}_sn{snr_level}.png"
@@ -664,120 +837,27 @@ def plot_4panel(
     return out
 
 
-def plot_5panel(
-    spk, noise, snr_level,
-    clean_path, noisy_path,
-    gt_b, pred_b_sb, pred_b_si,
-    audio_dur, pred_dur_sb, pred_dur_si,
-    output_dir,
-) -> Path:
-    """5-panel plot: clean, noisy, Silero VAD, SpeechBrain VAD, Ground Truth."""
-    clean_wav, c_sr = load_mono_np(clean_path)
-    noisy_wav, n_sr = load_mono_np(noisy_path)
+# Keep backward-compatible wrappers
+def plot_4panel(spk, noise, snr_level, clean_path, noisy_path,
+                gt_b, pred_b, audio_dur, pred_dur, output_dir,
+                model_name: str = "SpeechBrain") -> Path:
+    color = C_SPEECH if "Speech" in model_name else (
+            C_SILERO if "Silero" in model_name else C_SINCQDR)
+    return plot_panels(spk, noise, snr_level, clean_path, noisy_path,
+                       gt_b, audio_dur,
+                       [{"name": model_name, "color": color, "boundaries": pred_b, "dur": pred_dur}],
+                       output_dir)
 
-    t_clean = np.arange(len(clean_wav)) / c_sr
-    t_noisy = np.arange(len(noisy_wav)) / n_sr
-    x_max = max(t_clean[-1] if len(t_clean) else 0,
-                t_noisy[-1] if len(t_noisy) else 0)
 
-    fig, axes = plt.subplots(5, 1, figsize=(14, 11),
-                             gridspec_kw={"height_ratios": [1, 1, 0.7, 0.7, 0.7]})
-    fig.patch.set_facecolor("white")
-    plt.subplots_adjust(hspace=0.50, top=0.92, bottom=0.07, left=0.07, right=0.97)
+def plot_5panel(spk, noise, snr_level, clean_path, noisy_path,
+                gt_b, pred_b_sb, pred_b_si,
+                audio_dur, pred_dur_sb, pred_dur_si, output_dir) -> Path:
+    return plot_panels(spk, noise, snr_level, clean_path, noisy_path,
+                       gt_b, audio_dur,
+                       [{"name": "Silero",      "color": C_SILERO, "boundaries": pred_b_si, "dur": pred_dur_si},
+                        {"name": "SpeechBrain", "color": C_SPEECH, "boundaries": pred_b_sb, "dur": pred_dur_sb}],
+                       output_dir)
 
-    # ── Panel 1: Clean waveform ──
-    ax = axes[0]
-    ax.plot(t_clean, clean_wav, color=C_CLEAN, linewidth=0.4, alpha=0.9)
-    ax.set_xlim(0, x_max); ax.set_ylim(-1.1, 1.1)
-    ax.set_ylabel("Amplitude", fontsize=9)
-    ax.set_title("Panel 1 – Clean Audio Signal", fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor(C_BG)
-    ax.axhline(0, color="#999", lw=0.4)
-    sp_d, si_d = duration_stats(gt_b, audio_dur)
-    ax.text(0.99, 0.95, f"Duration: {audio_dur:.2f}s  |  GT speech: {sp_d:.2f}s  silence: {si_d:.2f}s",
-            transform=ax.transAxes, ha="right", va="top", fontsize=7.5, color="#444")
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-
-    # ── Panel 2: Noisy waveform ──
-    ax = axes[1]
-    ax.plot(t_noisy, noisy_wav, color=C_NOISY, linewidth=0.4, alpha=0.9)
-    ax.set_xlim(0, x_max); ax.set_ylim(-1.1, 1.1)
-    ax.set_ylabel("Amplitude", fontsize=9)
-    ax.set_title(f"Panel 2 – Noisy Audio ({noise.capitalize()} @ {snr_level} dB SNR)",
-                 fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor(C_BG)
-    ax.axhline(0, color="#999", lw=0.4)
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-
-    # ── Panel 3: Silero VAD detection ──
-    ax = axes[2]
-    t_pred, y_pred = boundaries_to_step(pred_b_si, pred_dur_si)
-    ax.fill_between(t_pred, y_pred, step="mid", color="#FF6F00", alpha=0.5, label="Speech")
-    ax.fill_between(t_pred, 1 - y_pred, step="mid", color=C_NOISE_FILL, alpha=0.25)
-    ax.plot(t_pred, y_pred, color="#FF6F00", linewidth=1.2, drawstyle="steps-mid")
-    ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
-    ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
-    ax.set_ylabel("VAD Output", fontsize=9)
-    ax.set_title("Panel 3 – Silero VAD Detection (on noisy audio)",
-                 fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor("white")
-    ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-    _annotate_segments(ax, pred_b_si, pred_dur_si)
-
-    # ── Panel 4: SpeechBrain VAD detection ──
-    ax = axes[3]
-    t_pred, y_pred = boundaries_to_step(pred_b_sb, pred_dur_sb)
-    ax.fill_between(t_pred, y_pred, step="mid", color=C_SPEECH, alpha=0.5, label="Speech")
-    ax.fill_between(t_pred, 1 - y_pred, step="mid", color=C_NOISE_FILL, alpha=0.25)
-    ax.plot(t_pred, y_pred, color=C_SPEECH, linewidth=1.2, drawstyle="steps-mid")
-    ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
-    ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
-    ax.set_ylabel("VAD Output", fontsize=9)
-    ax.set_title("Panel 4 – SpeechBrain VAD Detection (on noisy audio)",
-                 fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor("white")
-    ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-    _annotate_segments(ax, pred_b_sb, pred_dur_sb)
-
-    # ── Panel 5: Ground-Truth VAD ──
-    ax = axes[4]
-    t_gt, y_gt = boundaries_to_step(gt_b, audio_dur)
-    ax.fill_between(t_gt, y_gt, step="mid", color=C_GT_SPEECH, alpha=0.45, label="Speech")
-    ax.fill_between(t_gt, 1 - y_gt, step="mid", color=C_GT_NOISE, alpha=0.15)
-    ax.plot(t_gt, y_gt, color=C_GT_SPEECH, linewidth=1.2, drawstyle="steps-mid")
-    ax.set_xlim(0, x_max); ax.set_ylim(-0.05, 1.15)
-    ax.set_yticks([0, 1]); ax.set_yticklabels(["Noise", "Speech"], fontsize=8)
-    ax.set_ylabel("VAD Output", fontsize=9)
-    ax.set_title("Panel 5 – Ground-Truth VAD (energy-based from clean audio)",
-                 fontsize=10, fontweight="bold", pad=4)
-    ax.set_facecolor("white")
-    ax.axhline(0.5, color="#CCC", lw=0.5, ls="--")
-    ax.set_xlabel("Time [s]", fontsize=9)
-    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
-    _annotate_segments(ax, gt_b, audio_dur)
-
-    # ── Suptitle ──
-    fig.suptitle(
-        f"VAD Comparison  –  {spk.upper()}  |  {noise.capitalize()} noise  |  {snr_level} dB SNR",
-        fontsize=12, fontweight="bold", y=0.97)
-
-    # ── Legend ──
-    legend_handles = [
-        mpatches.Patch(color="#FF6F00", alpha=0.55, label="Silero: Speech"),
-        mpatches.Patch(color=C_SPEECH, alpha=0.55, label="SpeechBrain: Speech"),
-        mpatches.Patch(color=C_NOISE_FILL, alpha=0.35, label="Predicted: Noise"),
-        mpatches.Patch(color=C_GT_SPEECH, alpha=0.55, label="GT: Speech"),
-        mpatches.Patch(color=C_GT_NOISE, alpha=0.35, label="GT: Noise/Silence"),
-    ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=5, fontsize=8.5,
-               framealpha=0.9, bbox_to_anchor=(0.5, 0.002))
-
-    out = output_dir / f"{spk}_{noise}_sn{snr_level}.png"
-    plt.savefig(str(out), dpi=120, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -930,16 +1010,25 @@ def parse_args():
     p.add_argument("--output_dir", default=Path("cm_output"), type=Path)
     p.add_argument("--device",     default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--model",      default="speechbrain",
-                   choices=["speechbrain", "silero", "both"],
-                   help="Which VAD model to use (default: speechbrain)")
+                   choices=["speechbrain", "silero", "sincqdr", "both", "all"],
+                   help="Which VAD model(s) to use: "
+                        "speechbrain, silero, sincqdr, both (sb+si), all (sb+si+sqdr)")
+    # Per-panel disable flags (override --model selection)
+    p.add_argument("--no_speechbrain", action="store_true",
+                   help="Disable SpeechBrain panel even if selected by --model")
+    p.add_argument("--no_silero",      action="store_true",
+                   help="Disable Silero panel even if selected by --model")
+    p.add_argument("--no_sincqdr",     action="store_true",
+                   help="Disable SincQDR-VAD panel even if selected by --model")
     p.add_argument("--silero_model_path", type=Path,
                    default=SILERO_ONNX_DEFAULT,
                    help="Path to Silero VAD ONNX model file")
+    p.add_argument("--sincqdr_ckpt_path", type=Path,
+                   default=SINCQDR_CKPT_DEFAULT,
+                   help="Path to SincQDR-VAD checkpoint (.ckpt)")
     p.add_argument("--ckpt", default="epoch_100",
                    choices=["epoch_91", "epoch_100"],
-                   help="Which SpeechBrain checkpoint to use: "
-                        "epoch_91 = local CKPT+epoch_91, "
-                        "epoch_100 = local CKPT+epoch_100 (default: epoch_100)")
+                   help="Which SpeechBrain checkpoint to use (default: epoch_100)")
     p.add_argument("--activation_th",   type=float, default=0.5)
     p.add_argument("--deactivation_th", type=float, default=0.25)
     p.add_argument("--close_th",        type=float, default=0.25)
@@ -963,8 +1052,13 @@ def main():
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    use_sb = args.model in ("speechbrain", "both")
-    use_si = args.model in ("silero", "both")
+    # Determine which models are active (--model sets defaults; --no_* overrides)
+    use_sb = args.model in ("speechbrain", "both", "all") and not args.no_speechbrain
+    use_si = args.model in ("silero",      "both", "all") and not args.no_silero
+    use_sq = args.model in ("sincqdr",                "all") and not args.no_sincqdr
+
+    if not (use_sb or use_si or use_sq):
+        logger.error("All models are disabled – nothing to run."); sys.exit(1)
 
     # 1. Discover dataset
     logger.info(f"Scanning: {input_dir}")
@@ -979,6 +1073,7 @@ def main():
     # 2. Load model(s)
     mods_sb = None
     mods_si = None
+    mods_sq = None
     tr = 0.01  # default time resolution
 
     if use_sb:
@@ -997,14 +1092,25 @@ def main():
             tr = 0.032  # Silero chunk duration at 16kHz with 512 samples
         logger.info("Silero model loaded.")
 
+    if use_sq:
+        logger.info("Loading SincQDR-VAD model …")
+        if not args.sincqdr_ckpt_path.exists():
+            logger.error(f"SincQDR checkpoint not found: {args.sincqdr_ckpt_path}")
+            sys.exit(1)
+        mods_sq = load_sincqdr_model(args.sincqdr_ckpt_path, device=args.device)
+        logger.info("SincQDR-VAD model loaded.")
+
     # 3. Evaluation
     # Aggregated confusion matrices per model
     agg_sb = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
     agg_si = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
-    per_snr_sb: Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
-    per_snr_si: Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
-    per_noise_sb: Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
-    per_noise_si: Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    agg_sq = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
+    per_snr_sb:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_snr_si:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_snr_sq:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_noise_sb:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_noise_si:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_noise_sq:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     n_processed = 0
 
     gt_tr = mods_sb["time_resolution"] if mods_sb else 0.01
@@ -1027,8 +1133,8 @@ def main():
         for noise, snr_files in sorted(data["noisy"].items()):
             for snr_level, noisy_path in sorted(snr_files.items()):
                 # --- SpeechBrain ---
-                pred_b_sb_ok, pred_b_si_ok = None, None
-                pred_dur_sb, pred_dur_si = 0.0, 0.0
+                pred_b_sb_ok, pred_b_si_ok, pred_b_sq_ok = None, None, None
+                pred_dur_sb, pred_dur_si, pred_dur_sq = 0.0, 0.0, 0.0
 
                 if use_sb:
                     try:
@@ -1052,15 +1158,6 @@ def main():
                         logger.info(f"  [SB] {noisy_path.name:<40} Acc={dm['accuracy']:.3f} "
                                     f"F1={dm['f1']:.3f}  speech={p_sp:.2f}s")
                         pred_b_sb_ok = pred_b_sb
-
-                        # 4-panel plot (only when not "both" mode)
-                        if args.model != "both":
-                            try:
-                                plot_4panel(spk, noise, snr_level, clean_path, noisy_path,
-                                            gt_b, pred_b_sb, audio_dur, pred_dur_sb, output_dir,
-                                            model_name="SpeechBrain")
-                            except Exception as e:
-                                logger.warning(f"  Plot failed: {e}")
 
                     except Exception as exc:
                         logger.warning(f"  [SB] Failed {noisy_path.name}: {exc}")
@@ -1088,28 +1185,53 @@ def main():
                                     f"F1={dm['f1']:.3f}  speech={p_sp:.2f}s")
                         pred_b_si_ok = pred_b_si
 
-                        # 4-panel plot (only when not "both" mode)
-                        if args.model != "both":
-                            try:
-                                si_out_dir = output_dir / "silero"
-                                si_out_dir.mkdir(parents=True, exist_ok=True)
-                                plot_4panel(spk, noise, snr_level, clean_path, noisy_path,
-                                            gt_b, pred_b_si, audio_dur, pred_dur_si, si_out_dir,
-                                            model_name="Silero")
-                            except Exception as e:
-                                logger.warning(f"  Plot failed: {e}")
-
                     except Exception as exc:
                         logger.warning(f"  [SI] Failed {noisy_path.name}: {exc}")
 
-                # --- 5-panel plot when both models succeeded ---
-                if args.model == "both" and pred_b_sb_ok is not None and pred_b_si_ok is not None:
+                # --- SincQDR ---
+                if use_sq:
                     try:
-                        plot_5panel(spk, noise, snr_level, clean_path, noisy_path,
-                                    gt_b, pred_b_sb_ok, pred_b_si_ok,
-                                    audio_dur, pred_dur_sb, pred_dur_si, output_dir)
+                        pred_b_sq, pred_dur_sq = run_sincqdr_vad(
+                            mods_sq, noisy_path,
+                            args.activation_th, args.deactivation_th,
+                            args.close_th, args.len_th, device=args.device)
+
+                        n_frames = min(len(gt_labels), max(1, round(pred_dur_sq / gt_tr)))
+                        pred_labels = boundaries_to_frame_labels(pred_b_sq, n_frames, gt_tr)
+                        cm = compute_confusion(gt_labels[:n_frames], pred_labels, gt_tr)
+
+                        for k in agg_sq:
+                            agg_sq[k] += cm[k]
+                            per_snr_sq[snr_level][k] += cm[k]
+                            per_noise_sq[noise][k] += cm[k]
+
+                        dm = derived_metrics(cm)
+                        p_sp, _ = duration_stats(pred_b_sq, pred_dur_sq)
+                        logger.info(f"  [SQ] {noisy_path.name:<40} Acc={dm['accuracy']:.3f} "
+                                    f"F1={dm['f1']:.3f}  speech={p_sp:.2f}s")
+                        pred_b_sq_ok = pred_b_sq
+
+                    except Exception as exc:
+                        logger.warning(f"  [SQ] Failed {noisy_path.name}: {exc}")
+
+                # --- Combined / per-model plot ---
+                model_results = []
+                if use_si and pred_b_si_ok is not None:
+                    model_results.append({"name": "Silero",       "color": C_SILERO,
+                                          "boundaries": pred_b_si_ok, "dur": pred_dur_si})
+                if use_sb and pred_b_sb_ok is not None:
+                    model_results.append({"name": "SpeechBrain",  "color": C_SPEECH,
+                                          "boundaries": pred_b_sb_ok, "dur": pred_dur_sb})
+                if use_sq and pred_b_sq_ok is not None:
+                    model_results.append({"name": "SincQDR-VAD",  "color": C_SINCQDR,
+                                          "boundaries": pred_b_sq_ok, "dur": pred_dur_sq})
+
+                if model_results:
+                    try:
+                        plot_panels(spk, noise, snr_level, clean_path, noisy_path,
+                                    gt_b, audio_dur, model_results, output_dir)
                     except Exception as e:
-                        logger.warning(f"  5-panel plot failed: {e}")
+                        logger.warning(f"  Plot failed: {e}")
 
                 n_processed += 1
 
@@ -1179,11 +1301,21 @@ def main():
         si_out_dir = output_dir / "silero" if use_sb else output_dir
         si_out_dir.mkdir(parents=True, exist_ok=True)
         _print_summary("Silero", agg_si, per_snr_si, per_noise_si, si_out_dir)
+    if use_sq:
+        sq_out_dir = output_dir / "sincqdr" if (use_sb or use_si) else output_dir
+        sq_out_dir.mkdir(parents=True, exist_ok=True)
+        _print_summary("SincQDR", agg_sq, per_snr_sq, per_noise_sq, sq_out_dir)
 
-    # 5. Comparison confusion matrix (both models)
-    if args.model == "both":
+    # 5. Comparison confusion matrix (multiple models)
+    active_cms = []
+    if use_sb: active_cms.append(("SpeechBrain", agg_sb))
+    if use_si: active_cms.append(("Silero",      agg_si))
+    if use_sq: active_cms.append(("SincQDR-VAD", agg_sq))
+    if len(active_cms) > 1:
         out_cmp = plot_comparison_confusion_matrix(
-            agg_sb, agg_si, n_speakers, n_processed, output_dir)
+            agg_sb if use_sb else {"tp":0,"tn":0,"fp":0,"fn":0},
+            agg_si if use_si else {"tp":0,"tn":0,"fp":0,"fn":0},
+            n_speakers, n_processed, output_dir)
         print(f"\n  Comparison matrix → {out_cmp}")
 
     print(f"  Waveform plots    → {output_dir}/")
