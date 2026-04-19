@@ -9,3 +9,6 @@ sinc-vad:
 
 clean:
 	rm -r test/
+
+demo:
+	python demo.py datasets/noise/NOIZEUS/8khz/sp01_airport_sn0.wav  -o ./test/clean.wav --plot-save ./test/result.png
