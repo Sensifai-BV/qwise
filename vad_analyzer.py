@@ -9,13 +9,14 @@ Panels (per file):
   3 – Silero VAD (orange)       [if enabled]
   4 – SpeechBrain VAD (green)   [if enabled]
   5 – SincQDR-VAD (purple)      [if enabled]
-  6 – Ground-Truth VAD (dark green)
+  6 – Tr-VAD (teal)             [if enabled]
+  7 – Ground-Truth VAD (dark green)
 
 Ground truth is derived from the **clean audio energy envelope**
 (not from running the neural VAD on the clean file).
 
 Also produces:
-  - Aggregated confusion matrix PNG
+  - Aggregated confusion matrix PNG (per model + merged for all enabled)
   - Per-SNR summary table (printed + saved as CSV)
 
 Usage:
@@ -23,10 +24,10 @@ Usage:
         --input_dir  /path/to/noizeus_dataset \
         [--output_dir ./cm_output] \
         [--device cpu] \
-        [--model speechbrain|silero|sincqdr|both|all] \
-        [--no_speechbrain] [--no_silero] [--no_sincqdr] \
+        [--enable_speechbrain] [--enable_silero] [--enable_sincqdr] [--enable_trvad] \
         [--silero_model_path ./silero-vad/src/silero_vad/data/silero_vad.onnx] \
         [--sincqdr_ckpt_path ./SincQDR-VAD/ckpt/sincqdr_vad.ckpt] \
+        [--trvad_ckpt_path  ./Tr-VAD/checkpoint/weights_10_acc_97.09.pth] \
         [--activation_th   0.5] \
         [--deactivation_th 0.25] \
         [--close_th        0.250] \
@@ -62,6 +63,7 @@ HPARAMS_FILE = SCRIPT_DIR / "speechbrain" / "recipes" / "LibriParty" / "VAD" / "
 SAVE_DIR     = SCRIPT_DIR / "speechbrain" / "CRDNN_VAD" / "save"
 SILERO_ONNX_DEFAULT  = SCRIPT_DIR / "silero-vad" / "src" / "silero_vad" / "data" / "silero_vad.onnx"
 SINCQDR_CKPT_DEFAULT = SCRIPT_DIR / "SincQDR-VAD" / "ckpt" / "sincqdr_vad.ckpt"
+TRVAD_CKPT_DEFAULT   = SCRIPT_DIR / "Tr-VAD" / "checkpoint" / "weights_10_acc_97.09.pth"
 BOUNDARY_MARKER = 1.0
 
 # SincQDR-VAD hyper-parameters (must match training config)
@@ -69,6 +71,9 @@ SINCQDR_WINDOW_SIZE = 0.63   # seconds  (training used 0.63)
 SINCQDR_OVERLAP     = 0.875  # fraction
 SINCQDR_SR          = 16000
 SINCQDR_MEDIAN_K    = 7
+
+# Tr-VAD hyper-parameters
+TRVAD_SR = 16000
 
 RE_CLEAN = re.compile(r"^(sp\d+)\.wav$",               re.IGNORECASE)
 RE_NOISY = re.compile(r"^(sp\d+)_(.+?)_sn(\d+)\.wav$", re.IGNORECASE)
@@ -610,6 +615,133 @@ def run_sincqdr_vad(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Tr-VAD loading & inference
+# ────────────────────────────────────────────────────────────────────────────
+def load_trvad_model(ckpt_path: Path, device: str = "cpu"):
+    """Load Tr-VAD model from a .pth checkpoint."""
+    trvad_dir = SCRIPT_DIR / "Tr-VAD"
+    if str(trvad_dir) not in sys.path:
+        sys.path.insert(0, str(trvad_dir))
+    from params import HParams
+    from VAD_T import VADModel
+    from utils import get_parameter_number
+
+    hparams = HParams()
+    model = VADModel(
+        dim_in=hparams.dim_in, d_model=hparams.d_model,
+        units_in=hparams.units_in, units=hparams.units,
+        layers=hparams.layers, P=hparams.P,
+        drop_rate=0, activation=hparams.activation,
+    ).to(device)
+    checkpoint = torch.load(str(ckpt_path), map_location=device)
+    model.load_state_dict(checkpoint['model'])
+    model.eval()
+    logger.info(f"Tr-VAD model loaded from {ckpt_path}")
+    return model, hparams
+
+
+def run_trvad_vad(
+    model,
+    hparams,
+    path: Path,
+    act: float,
+    deact: float,
+    close: float,
+    lth: float,
+    device: str = "cpu",
+) -> Tuple[torch.Tensor, float]:
+    """
+    Run Tr-VAD on an audio file. Returns (boundaries, total_duration_seconds).
+    """
+    import librosa
+    trvad_dir = SCRIPT_DIR / "Tr-VAD"
+    if str(trvad_dir) not in sys.path:
+        sys.path.insert(0, str(trvad_dir))
+    from AFPC_feature import AFPC
+    from utils import data_transform, bdnn_prediction
+    import torch.nn.functional as F
+
+    waveform, sr = librosa.load(str(path), sr=hparams.sample_rate)
+    total_dur = len(waveform) / sr
+    waveform = waveform / (np.abs(waveform).max() + 1e-12) * 0.999
+
+    feature_input = AFPC.features(
+        waveform, fs=sr, nfft=hparams.n_fft,
+        winstep=hparams.winstep, winlen=hparams.winlen,
+        nfilt=hparams.nfilt, ncoef=hparams.ncoef,
+    )[:, :80]
+    feature_input = (feature_input - np.mean(feature_input, axis=0)) / (
+        np.std(feature_input, axis=0) + 1e-10
+    )
+    feature_input = torch.as_tensor(feature_input, dtype=torch.float32)
+
+    window_size, unit_size = hparams.w, hparams.u
+    feature_input = data_transform(
+        feature_input, window_size, unit_size,
+        feature_input.min(), DEVICE=torch.device('cpu'),
+    )
+    feature_input = feature_input[window_size: -window_size, :, :]
+
+    with torch.inference_mode():
+        train_data = feature_input.to(device)
+        postnet_output = model(train_data)
+        _, soft_vad = bdnn_prediction(
+            F.sigmoid(postnet_output).cpu().detach().numpy(),
+            w=window_size, u=unit_size, threshold=0.5,
+        )
+
+    # soft_vad shape: (N, 1) – per-frame soft probabilities
+    probs = soft_vad[:, 0].tolist()
+
+    # Pad with leading/trailing zeros to account for the window trimming
+    probs = [0.0] * window_size + probs + [0.0] * window_size
+
+    # Each frame covers winstep seconds
+    frame_dur = hparams.winstep  # 0.016s
+
+    # Apply hysteresis thresholding
+    triggered = False
+    speech_frames = []
+    for p in probs:
+        if not triggered:
+            if p >= act:
+                triggered = True
+                speech_frames.append(True)
+            else:
+                speech_frames.append(False)
+        else:
+            if p < deact:
+                triggered = False
+                speech_frames.append(False)
+            else:
+                speech_frames.append(True)
+
+    # Convert to boundaries
+    boundaries = []
+    in_speech = False
+    start = 0.0
+    for i, is_speech in enumerate(speech_frames):
+        t = i * frame_dur
+        if is_speech and not in_speech:
+            start = t
+            in_speech = True
+        elif not is_speech and in_speech:
+            boundaries.append([start, t])
+            in_speech = False
+    if in_speech:
+        boundaries.append([start, min(len(speech_frames) * frame_dur, total_dur)])
+
+    if boundaries:
+        b = torch.FloatTensor(boundaries)
+        b = merge_close(b, close)
+        b = remove_short(b, lth)
+    else:
+        b = torch.zeros(0, 2)
+
+    return b, total_dur
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Frame labels & confusion metrics
 # ────────────────────────────────────────────────────────────────────────────
 def boundaries_to_frame_labels(boundaries: torch.Tensor, n: int, tr: float) -> np.ndarray:
@@ -709,6 +841,7 @@ def _annotate_segments(ax, boundaries, total_dur):
 # Per-model colours
 C_SILERO    = "#FF6F00"
 C_SINCQDR   = "#6A1B9A"
+C_TRVAD     = "#00796B"
 
 
 def _draw_vad_panel(ax, boundaries, dur, color, title, x_max, annotate=False):
@@ -926,17 +1059,19 @@ def plot_confusion_matrix(cm, n_speakers, n_noisy, output_dir, ckpt_label: str =
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Comparison confusion matrix plot (both models side-by-side)
+# Generic N-model comparison confusion matrix plot
 # ────────────────────────────────────────────────────────────────────────────
 def plot_comparison_confusion_matrix(
-    cm_sb: Dict[str, float],
-    cm_si: Dict[str, float],
+    model_cms: List[Tuple[str, Dict[str, float]]],
     n_speakers: int,
     n_noisy: int,
     output_dir: Path,
 ) -> Path:
-    """Side-by-side confusion matrices for SpeechBrain vs Silero."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6.5))
+    """Side-by-side confusion matrices for all enabled models."""
+    n_models = len(model_cms)
+    fig, axes = plt.subplots(1, n_models, figsize=(7 * n_models, 6.5))
+    if n_models == 1:
+        axes = [axes]
     fig.patch.set_facecolor("#F8F9FA")
 
     cell_meta = [
@@ -944,10 +1079,7 @@ def plot_comparison_confusion_matrix(
         [("Missed Speech", "FN", "#FB8C00"), ("True Speech",  "TP", "#2E7D32")],
     ]
 
-    for ax, cm, title in [
-        (ax1, cm_sb, "SpeechBrain VAD (CRDNN)"),
-        (ax2, cm_si, "Silero VAD (ONNX)"),
-    ]:
+    for ax, (title, cm) in zip(axes, model_cms):
         tp, tn, fp, fn = cm["tp"], cm["tn"], cm["fp"], cm["fn"]
         total = tp + tn + fp + fn
         dm = derived_metrics(cm)
@@ -984,17 +1116,17 @@ def plot_comparison_confusion_matrix(
             f"R={dm['recall']:.4f}  F1={dm['f1']:.4f}",
             fontsize=10, fontweight="bold", pad=12)
 
+    model_names = [name for name, _ in model_cms]
     fig.suptitle(
         "VAD Model Comparison – Aggregated Confusion Matrices\n"
         "NOIZEUS dataset  (GT = energy-based from clean audio)",
         fontsize=12, fontweight="bold", y=1.02)
 
-    dm_sb = derived_metrics(cm_sb)
-    dm_si = derived_metrics(cm_si)
+    f1_parts = "   ".join(
+        f"{name} F1={derived_metrics(cm)['f1']:.4f}" for name, cm in model_cms
+    )
     fig.text(0.5, -0.02,
-             f"Speakers={n_speakers}   Files={n_noisy}\n"
-             f"SpeechBrain F1={dm_sb['f1']:.4f}   Silero F1={dm_si['f1']:.4f}   "
-             f"Δ F1={dm_sb['f1'] - dm_si['f1']:+.4f}",
+             f"Speakers={n_speakers}   Files={n_noisy}\n{f1_parts}",
              ha="center", va="top", fontsize=9, color="#444")
 
     plt.tight_layout(rect=[0, 0.05, 1, 0.95])
@@ -1009,23 +1141,24 @@ def parse_args():
     p.add_argument("--input_dir",  required=True, type=Path)
     p.add_argument("--output_dir", default=Path("cm_output"), type=Path)
     p.add_argument("--device",     default="cpu", choices=["cpu", "cuda"])
-    p.add_argument("--model",      default="speechbrain",
-                   choices=["speechbrain", "silero", "sincqdr", "both", "all"],
-                   help="Which VAD model(s) to use: "
-                        "speechbrain, silero, sincqdr, both (sb+si), all (sb+si+sqdr)")
-    # Per-panel disable flags (override --model selection)
-    p.add_argument("--no_speechbrain", action="store_true",
-                   help="Disable SpeechBrain panel even if selected by --model")
-    p.add_argument("--no_silero",      action="store_true",
-                   help="Disable Silero panel even if selected by --model")
-    p.add_argument("--no_sincqdr",     action="store_true",
-                   help="Disable SincQDR-VAD panel even if selected by --model")
+    # Enable flags – enable only the models you want
+    p.add_argument("--enable_speechbrain", action="store_true",
+                   help="Enable SpeechBrain VAD panel")
+    p.add_argument("--enable_silero",      action="store_true",
+                   help="Enable Silero VAD panel")
+    p.add_argument("--enable_sincqdr",     action="store_true",
+                   help="Enable SincQDR-VAD panel")
+    p.add_argument("--enable_trvad",       action="store_true",
+                   help="Enable Tr-VAD panel")
     p.add_argument("--silero_model_path", type=Path,
                    default=SILERO_ONNX_DEFAULT,
                    help="Path to Silero VAD ONNX model file")
     p.add_argument("--sincqdr_ckpt_path", type=Path,
                    default=SINCQDR_CKPT_DEFAULT,
                    help="Path to SincQDR-VAD checkpoint (.ckpt)")
+    p.add_argument("--trvad_ckpt_path", type=Path,
+                   default=TRVAD_CKPT_DEFAULT,
+                   help="Path to Tr-VAD checkpoint (.pth)")
     p.add_argument("--ckpt", default="epoch_100",
                    choices=["epoch_91", "epoch_100"],
                    help="Which SpeechBrain checkpoint to use (default: epoch_100)")
@@ -1052,13 +1185,15 @@ def main():
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine which models are active (--model sets defaults; --no_* overrides)
-    use_sb = args.model in ("speechbrain", "both", "all") and not args.no_speechbrain
-    use_si = args.model in ("silero",      "both", "all") and not args.no_silero
-    use_sq = args.model in ("sincqdr",                "all") and not args.no_sincqdr
+    # Determine which models are active
+    use_sb = args.enable_speechbrain
+    use_si = args.enable_silero
+    use_sq = args.enable_sincqdr
+    use_tv = args.enable_trvad
 
-    if not (use_sb or use_si or use_sq):
-        logger.error("All models are disabled – nothing to run."); sys.exit(1)
+    if not (use_sb or use_si or use_sq or use_tv):
+        logger.error("No models enabled – use --enable_speechbrain, --enable_silero, "
+                      "--enable_sincqdr, and/or --enable_trvad."); sys.exit(1)
 
     # 1. Discover dataset
     logger.info(f"Scanning: {input_dir}")
@@ -1074,6 +1209,8 @@ def main():
     mods_sb = None
     mods_si = None
     mods_sq = None
+    mods_tv = None
+    tv_hparams = None
     tr = 0.01  # default time resolution
 
     if use_sb:
@@ -1100,17 +1237,28 @@ def main():
         mods_sq = load_sincqdr_model(args.sincqdr_ckpt_path, device=args.device)
         logger.info("SincQDR-VAD model loaded.")
 
+    if use_tv:
+        logger.info("Loading Tr-VAD model …")
+        if not args.trvad_ckpt_path.exists():
+            logger.error(f"Tr-VAD checkpoint not found: {args.trvad_ckpt_path}")
+            sys.exit(1)
+        mods_tv, tv_hparams = load_trvad_model(args.trvad_ckpt_path, device=args.device)
+        logger.info("Tr-VAD model loaded.")
+
     # 3. Evaluation
     # Aggregated confusion matrices per model
     agg_sb = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
     agg_si = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
     agg_sq = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
+    agg_tv = {"tp": 0.0, "tn": 0.0, "fp": 0.0, "fn": 0.0}
     per_snr_sb:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     per_snr_si:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     per_snr_sq:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_snr_tv:    Dict[int, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     per_noise_sb:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     per_noise_si:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     per_noise_sq:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
+    per_noise_tv:  Dict[str, Dict[str, float]] = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     n_processed = 0
 
     gt_tr = mods_sb["time_resolution"] if mods_sb else 0.01
@@ -1133,8 +1281,8 @@ def main():
         for noise, snr_files in sorted(data["noisy"].items()):
             for snr_level, noisy_path in sorted(snr_files.items()):
                 # --- SpeechBrain ---
-                pred_b_sb_ok, pred_b_si_ok, pred_b_sq_ok = None, None, None
-                pred_dur_sb, pred_dur_si, pred_dur_sq = 0.0, 0.0, 0.0
+                pred_b_sb_ok, pred_b_si_ok, pred_b_sq_ok, pred_b_tv_ok = None, None, None, None
+                pred_dur_sb, pred_dur_si, pred_dur_sq, pred_dur_tv = 0.0, 0.0, 0.0, 0.0
 
                 if use_sb:
                     try:
@@ -1214,6 +1362,32 @@ def main():
                     except Exception as exc:
                         logger.warning(f"  [SQ] Failed {noisy_path.name}: {exc}")
 
+                # --- Tr-VAD ---
+                if use_tv:
+                    try:
+                        pred_b_tv, pred_dur_tv = run_trvad_vad(
+                            mods_tv, tv_hparams, noisy_path,
+                            args.activation_th, args.deactivation_th,
+                            args.close_th, args.len_th, device=args.device)
+
+                        n_frames = min(len(gt_labels), max(1, round(pred_dur_tv / gt_tr)))
+                        pred_labels = boundaries_to_frame_labels(pred_b_tv, n_frames, gt_tr)
+                        cm = compute_confusion(gt_labels[:n_frames], pred_labels, gt_tr)
+
+                        for k in agg_tv:
+                            agg_tv[k] += cm[k]
+                            per_snr_tv[snr_level][k] += cm[k]
+                            per_noise_tv[noise][k] += cm[k]
+
+                        dm = derived_metrics(cm)
+                        p_sp, _ = duration_stats(pred_b_tv, pred_dur_tv)
+                        logger.info(f"  [TV] {noisy_path.name:<40} Acc={dm['accuracy']:.3f} "
+                                    f"F1={dm['f1']:.3f}  speech={p_sp:.2f}s")
+                        pred_b_tv_ok = pred_b_tv
+
+                    except Exception as exc:
+                        logger.warning(f"  [TV] Failed {noisy_path.name}: {exc}")
+
                 # --- Combined / per-model plot ---
                 model_results = []
                 if use_si and pred_b_si_ok is not None:
@@ -1225,6 +1399,9 @@ def main():
                 if use_sq and pred_b_sq_ok is not None:
                     model_results.append({"name": "SincQDR-VAD",  "color": C_SINCQDR,
                                           "boundaries": pred_b_sq_ok, "dur": pred_dur_sq})
+                if use_tv and pred_b_tv_ok is not None:
+                    model_results.append({"name": "Tr-VAD",       "color": C_TRVAD,
+                                          "boundaries": pred_b_tv_ok, "dur": pred_dur_tv})
 
                 if model_results:
                     try:
@@ -1298,24 +1475,27 @@ def main():
         _print_summary("SpeechBrain", agg_sb, per_snr_sb, per_noise_sb, output_dir,
                         ckpt_label=ckpt_label)
     if use_si:
-        si_out_dir = output_dir / "silero" if use_sb else output_dir
+        si_out_dir = output_dir / "silero" if (use_sb or use_sq or use_tv) else output_dir
         si_out_dir.mkdir(parents=True, exist_ok=True)
         _print_summary("Silero", agg_si, per_snr_si, per_noise_si, si_out_dir)
     if use_sq:
-        sq_out_dir = output_dir / "sincqdr" if (use_sb or use_si) else output_dir
+        sq_out_dir = output_dir / "sincqdr" if (use_sb or use_si or use_tv) else output_dir
         sq_out_dir.mkdir(parents=True, exist_ok=True)
         _print_summary("SincQDR", agg_sq, per_snr_sq, per_noise_sq, sq_out_dir)
+    if use_tv:
+        tv_out_dir = output_dir / "trvad" if (use_sb or use_si or use_sq) else output_dir
+        tv_out_dir.mkdir(parents=True, exist_ok=True)
+        _print_summary("Tr-VAD", agg_tv, per_snr_tv, per_noise_tv, tv_out_dir)
 
-    # 5. Comparison confusion matrix (multiple models)
+    # 5. Comparison confusion matrix (all enabled models side-by-side)
     active_cms = []
-    if use_sb: active_cms.append(("SpeechBrain", agg_sb))
-    if use_si: active_cms.append(("Silero",      agg_si))
-    if use_sq: active_cms.append(("SincQDR-VAD", agg_sq))
+    if use_sb: active_cms.append(("SpeechBrain (CRDNN)", agg_sb))
+    if use_si: active_cms.append(("Silero (ONNX)",       agg_si))
+    if use_sq: active_cms.append(("SincQDR-VAD",         agg_sq))
+    if use_tv: active_cms.append(("Tr-VAD",              agg_tv))
     if len(active_cms) > 1:
         out_cmp = plot_comparison_confusion_matrix(
-            agg_sb if use_sb else {"tp":0,"tn":0,"fp":0,"fn":0},
-            agg_si if use_si else {"tp":0,"tn":0,"fp":0,"fn":0},
-            n_speakers, n_processed, output_dir)
+            active_cms, n_speakers, n_processed, output_dir)
         print(f"\n  Comparison matrix → {out_cmp}")
 
     print(f"  Waveform plots    → {output_dir}/")
