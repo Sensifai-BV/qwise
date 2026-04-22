@@ -4,7 +4,7 @@ tr-vad:
 	--trvad_ckpt_path ./Tr-VAD/checkpoint/weights_10_acc_97.09.pth
 
 sinc-vad:
-	python vad_analyzer.py --input_dir datasets/noise/drone-mixed \
+	python vad_analyzer.py --input_dir datasets/noise/NOIZEUS/resampled_16k \
 	--output_dir ./test --enable_silero --enable_sincqdr --output_dir ./test
 
 clean:
