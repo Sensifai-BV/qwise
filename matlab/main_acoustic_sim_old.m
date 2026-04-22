@@ -1,4 +1,4 @@
-function main_acoustic_sim()
+function main_acoustic_sim_old()
 %% Unified Real-Time Acoustic Simulation
 %
 %  Single file · Single figure
