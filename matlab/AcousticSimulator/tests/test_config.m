@@ -13,8 +13,10 @@ function test_required_fields_present(tc)
     cfg = tc.TestData.cfg;
     fields_top = {'fs','frame_size','c','n_mics','mic_spacing', ...
                   'human_height','mouth_height','slant_dist','elev_deg', ...
-                  'drone_wav_path','env_wav_path','vad','mwf', ...
-                  'playback','ui'};
+                  'distance_ref', ...
+                  'speech_gain_init','drone_gain_init','env_gain_init', ...
+                  'drone_wav_path','env_wav_path','mixer','vad','mwf', ...
+                  'playback','record','ui'};
     for k = 1:numel(fields_top)
         verifyTrue(tc, isfield(cfg, fields_top{k}), ...
             sprintf('Missing cfg field: %s', fields_top{k}));
@@ -31,6 +33,35 @@ function test_required_fields_present(tc)
         verifyTrue(tc, isfield(cfg.mwf, mwf_req{k}), ...
             sprintf('Missing cfg.mwf field: %s', mwf_req{k}));
     end
+    mixer_req = {'mode','composite'};
+    for k = 1:numel(mixer_req)
+        verifyTrue(tc, isfield(cfg.mixer, mixer_req{k}), ...
+            sprintf('Missing cfg.mixer field: %s', mixer_req{k}));
+    end
+    pb_req = {'enabled','vad_default','mwf_default'};
+    for k = 1:numel(pb_req)
+        verifyTrue(tc, isfield(cfg.playback, pb_req{k}), ...
+            sprintf('Missing cfg.playback field: %s', pb_req{k}));
+    end
+    rec_req = {'dir','prefix','source'};
+    for k = 1:numel(rec_req)
+        verifyTrue(tc, isfield(cfg.record, rec_req{k}), ...
+            sprintf('Missing cfg.record field: %s', rec_req{k}));
+    end
+    % mic_model is intentionally gone — do not resurrect it.
+    verifyFalse(tc, isfield(cfg, 'mic_model'), ...
+        'cfg.mic_model must be removed — find_mac_mic() auto-detects now.');
+end
+
+function test_mixer_defaults_are_sane(tc)
+    cfg = tc.TestData.cfg;
+    verifyTrue(tc, ismember(lower(cfg.mixer.mode), {'perchannel','physical'}), ...
+        'cfg.mixer.mode must be ''perChannel'' or ''physical''.');
+    verifyTrue(tc, ismember(lower(cfg.mixer.composite), {'mic1','sum','mean'}), ...
+        'cfg.mixer.composite must be ''mic1'', ''sum'' or ''mean''.');
+    verifyGreaterThan(tc, cfg.speech_gain_init, 0);
+    verifyGreaterThanOrEqual(tc, cfg.drone_gain_init, 0);
+    verifyGreaterThanOrEqual(tc, cfg.env_gain_init,   0);
 end
 
 function test_sample_rate_and_frames_are_sane(tc)

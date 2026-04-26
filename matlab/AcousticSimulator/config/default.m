@@ -12,29 +12,45 @@ function cfg = default()
     cfg.loop_sec        = 120;           % pre-loaded noise loop length [s]
     cfg.c               = 343;           % speed of sound [m/s]
 
-    % ---------------- Microphone + virtual array ---------
-    cfg.mic_model       = 'MacBook Pro Microphone';  % search substring
+    % ---------------- Microphone + virtual array ---------------------
     cfg.n_mics          = 3;             % virtual uniform linear array
     cfg.mic_spacing     = 0.10;          % m
 
     % ---------------- Scene geometry ---------------------------------
     cfg.human_height    = 1.70;          % m
     cfg.mouth_height    = 0.88 * cfg.human_height;
-    cfg.slant_dist      = 2.50;          % m, speaker-to-drone slant
+    cfg.slant_dist      = 3.50;          % m, speaker-to-drone slant
     cfg.elev_deg        = 30;            % deg, elevation of drone
     cfg.drone_rpm       = 8000;
     cfg.drone_blades    = 3;
     cfg.ground_R        = 0.90;          % asphalt reflection coeff
     cfg.alpha_air_dB    = 0.004;         % dB/m/kHz air absorption
+    cfg.distance_ref    = 1.0;           % m  — 1/d law reference; gains
+                                         %       are clamped so d<d_ref
+                                         %       gives unity (no boost).
 
     % ---------------- Noise sources ----------------------------------
     cfg.drone_wav_path  = fullfile('wavs','drone_fan.wav');
     cfg.env_wav_path    = fullfile('wavs','env_ambient.wav');
+    cfg.speech_gain_init= 1.00;          % live-mic speech level at mic-1
     cfg.drone_gain_init = 0.40;
     cfg.env_gain_init   = 0.25;
 
+    % ---------------- Array wiring -----------------------------------
+    %   'perChannel' : mic-1 = laptop speech + drone + env  (realistic
+    %                  noisy speech the laptop mic actually picks up)
+    %                  mic-2 = drone wav   (noise-only reference)
+    %                  mic-3 = env wav     (noise-only reference)
+    %                  composite = mic-1 (already the full noisy mix)
+    %                  feeds the VAD and listening playback.
+    %   'physical'   : every mic picks up every source with per-source
+    %                  TDOA + 1/d spreading gain (research-grade acoustic
+    %                  model — keeps the SourceMixer tests green).
+    cfg.mixer.mode      = 'perChannel';
+    cfg.mixer.composite = 'mic1';        % 'mic1' | 'sum' | 'mean'
+
     % ---------------- VAD --------------------------------------------
-    cfg.vad.backend           = 'silero';      % 'auto' | 'silero' | 'energy'
+    cfg.vad.backend           = 'silero';    % 'auto' | 'silero' | 'energy'
     cfg.vad.onnx_path         = fullfile('vad','silero_vad.onnx');
     cfg.vad.silero_frame      = 512;         % 32 ms @ 16 kHz (Silero spec)
     cfg.vad.silero_threshold  = 0.50;
@@ -54,9 +70,21 @@ function cfg = default()
     cfg.mwf.alpha_ss          = 0.88;        % Rss EMA (speech frames)
     cfg.mwf.passthrough       = true;        % <-- current stub behaviour
 
-    % ---------------- Playback ---------------------------------------
+    % ---------------- Playback (user-triggered only) -----------------
+    % The simulator NEVER pumps the raw/noisy mix to the speakers
+    % automatically (avoids acoustic feedback into the mic).  The two
+    % defaults below decide whether each listening toggle starts on.
     cfg.playback.enabled      = true;
-    cfg.playback.source       = 'noisy';     % 'noisy' | 'enhanced'
+    cfg.playback.vad_default  = false;       % Play VAD-gated noisy speech
+    cfg.playback.mwf_default  = false;       % Play MWF enhanced output
+
+    % ---------------- Recording --------------------------------------
+    cfg.record.dir            = 'recordings';
+    cfg.record.prefix         = 'qwise';
+    % 'composite' : sum of all mic channels (laptop + drone + env)
+    % 'raw_mic'   : only the live laptop microphone signal
+    % 'speech'    : the speech channel (mic-1 post-gain)
+    cfg.record.source         = 'composite';
 
     % ---------------- Visualization ----------------------------------
     cfg.ui.spec_ncols         = 90;

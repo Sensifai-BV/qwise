@@ -213,3 +213,4 @@ datasets/*
 
 # test
 test/*
+matlab/AcousticSimulator/recordings/*

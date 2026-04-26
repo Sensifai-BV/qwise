@@ -6,17 +6,23 @@ classdef SimulatorUI < handle
 %
 %   Renders a single figure with:
 %     * Control panel  (Start/Stop, drone toggle+gain, env toggle+gain,
-%                       playback source switch, status)
+%                       Play VAD Speech, Play MWF, Record Start/Stop, status)
 %     * 3D scene       (speaker, drone, mic ULA, ground reflection)
 %     * Noisy spectrogram + MWF-enhanced spectrogram  (side by side)
 %     * Per-mic live waveforms (n_mics rows)
 %     * MWF output waveform
 %     * VAD score trace with detection shading
 %
-%   The real-time timer callback reads a mic frame, expands to the
-%   virtual ULA, optionally mixes drone + env noise, runs the VAD, runs
-%   the MWF (pass-through for now), plays the selected source to
-%   speakers, and refreshes every panel.
+%   The RT timer callback:
+%     1. reads one live mic block (clean human speech)
+%     2. pulls one block of drone-fan and ambient noise loops
+%     3. feeds the three sources through SourceMixer, which applies
+%        per-source TDOA + 1/d gain to produce the n-mic composite
+%     4. runs VAD on the reference mic of the composite
+%     5. runs the MWF (pass-through stub for now)
+%     6. emits exactly the outputs the user has opted-in to
+%        (VAD-gated composite OR MWF, never the raw noisy mix)
+%     7. optionally appends the block to an active WAV recording.
 
     properties
         Cfg
@@ -24,6 +30,7 @@ classdef SimulatorUI < handle
         audio
         vad
         mwf
+        mixer
         fig
         H = struct()
 
@@ -32,7 +39,9 @@ classdef SimulatorUI < handle
         env_on          = false
         drone_gain
         env_gain
-        playback_source        % 'noisy' | 'enhanced'
+        play_vad_on     = false   % emit VAD-gated noisy speech to speakers
+        play_mwf_on     = false   % emit MWF-enhanced speech to speakers
+        recording       = false   % is a WAV capture in progress
     end
 
     properties (Access = private)
@@ -52,10 +61,12 @@ classdef SimulatorUI < handle
             obj.audio = audio;
             obj.vad   = vad_obj;
             obj.mwf   = mwf_obj;
+            obj.mixer = SourceMixer(cfg, geo);
 
             obj.drone_gain       = cfg.drone_gain_init;
             obj.env_gain         = cfg.env_gain_init;
-            obj.playback_source  = cfg.playback.source;
+            obj.play_vad_on      = cfg.playback.vad_default;
+            obj.play_mwf_on      = cfg.playback.mwf_default;
             obj.spec_ncols       = cfg.ui.spec_ncols;
 
             N   = cfg.frame_size;
@@ -114,17 +125,17 @@ classdef SimulatorUI < handle
                 'FontSize', 13, 'FontWeight', 'bold', ...
                 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.95 0.88 0.55], ...
-                'Units', 'normalized', 'Position', [0.03 0.945 0.94 0.045]);
+                'Units', 'normalized', 'Position', [0.03 0.955 0.94 0.040]);
 
-            % --- Start / Stop ---
+            % --- Start / Stop capture ---
             obj.H.btn_start = uicontrol(ctrl, 'Style', 'togglebutton', ...
                 'String', 'Start Capture', ...
                 'FontSize', 10, 'FontWeight', 'bold', ...
                 'BackgroundColor', [0.16 0.60 0.25], 'ForegroundColor', 'w', ...
-                'Units', 'normalized', 'Position', [0.05 0.875 0.90 0.060], ...
+                'Units', 'normalized', 'Position', [0.05 0.895 0.90 0.050], ...
                 'Callback', @(src,~) obj.cb_start_(src));
 
-            obj.gui_sep_(ctrl, 0.862);
+            obj.gui_sep_(ctrl, 0.886);
 
             % --- Drone noise ---
             obj.H.btn_drone = uicontrol(ctrl, 'Style', 'togglebutton', ...
@@ -132,19 +143,19 @@ classdef SimulatorUI < handle
                 'FontSize', 9, ...
                 'BackgroundColor', [0.22 0.22 0.22], ...
                 'ForegroundColor', [0.60 0.60 0.60], ...
-                'Units', 'normalized', 'Position', [0.05 0.795 0.90 0.055], ...
+                'Units', 'normalized', 'Position', [0.05 0.828 0.90 0.045], ...
                 'Callback', @(src,~) obj.cb_toggle_(src, 'drone'));
             obj.H.lbl_dg = uicontrol(ctrl, 'Style', 'text', ...
                 'String', sprintf('Drone gain  %.2f', obj.drone_gain), ...
                 'FontSize', 8, 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.58 0.58 0.58], ...
-                'Units', 'normalized', 'Position', [0.05 0.759 0.90 0.028]);
+                'Units', 'normalized', 'Position', [0.05 0.798 0.90 0.023]);
             obj.H.sld_drone = uicontrol(ctrl, 'Style', 'slider', ...
                 'Min', 0, 'Max', 1, 'Value', obj.drone_gain, ...
-                'Units', 'normalized', 'Position', [0.05 0.729 0.90 0.030], ...
+                'Units', 'normalized', 'Position', [0.05 0.773 0.90 0.024], ...
                 'Callback', @(src,~) obj.cb_gain_(src, 'drone'));
 
-            obj.gui_sep_(ctrl, 0.715);
+            obj.gui_sep_(ctrl, 0.762);
 
             % --- Env noise ---
             obj.H.btn_env = uicontrol(ctrl, 'Style', 'togglebutton', ...
@@ -152,41 +163,63 @@ classdef SimulatorUI < handle
                 'FontSize', 9, ...
                 'BackgroundColor', [0.22 0.22 0.22], ...
                 'ForegroundColor', [0.60 0.60 0.60], ...
-                'Units', 'normalized', 'Position', [0.05 0.648 0.90 0.055], ...
+                'Units', 'normalized', 'Position', [0.05 0.705 0.90 0.045], ...
                 'Callback', @(src,~) obj.cb_toggle_(src, 'env'));
             obj.H.lbl_eg = uicontrol(ctrl, 'Style', 'text', ...
                 'String', sprintf('Env gain  %.2f', obj.env_gain), ...
                 'FontSize', 8, 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.58 0.58 0.58], ...
-                'Units', 'normalized', 'Position', [0.05 0.612 0.90 0.028]);
+                'Units', 'normalized', 'Position', [0.05 0.675 0.90 0.023]);
             obj.H.sld_env = uicontrol(ctrl, 'Style', 'slider', ...
                 'Min', 0, 'Max', 1, 'Value', obj.env_gain, ...
-                'Units', 'normalized', 'Position', [0.05 0.582 0.90 0.030], ...
+                'Units', 'normalized', 'Position', [0.05 0.650 0.90 0.024], ...
                 'Callback', @(src,~) obj.cb_gain_(src, 'env'));
 
-            obj.gui_sep_(ctrl, 0.568);
+            obj.gui_sep_(ctrl, 0.639);
 
-            % --- Playback source toggle ---
-            uicontrol(ctrl, 'Style', 'text', 'String', 'Playback', ...
+            % --- Listening toggles (user-gated playback) ---
+            uicontrol(ctrl, 'Style', 'text', 'String', 'Listen (optional)', ...
                 'FontSize', 9, 'FontWeight', 'bold', ...
                 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.85 0.85 0.85], ...
-                'Units', 'normalized', 'Position', [0.05 0.530 0.90 0.028]);
-            isEnh = strcmpi(obj.playback_source, 'enhanced');
-            obj.H.btn_playback = uicontrol(ctrl, 'Style', 'togglebutton', ...
-                'Value', double(isEnh), ...
-                'String', ternary_str(isEnh, 'Play: Enhanced (MWF)', 'Play: Noisy Mix'), ...
-                'FontSize', 9, ...
-                'BackgroundColor', ternary_vec(isEnh, [0.15 0.45 0.70], [0.35 0.35 0.35]), ...
-                'ForegroundColor', 'w', ...
-                'Units', 'normalized', 'Position', [0.05 0.475 0.90 0.050], ...
-                'Callback', @(src,~) obj.cb_playback_(src));
+                'Units', 'normalized', 'Position', [0.05 0.600 0.90 0.028]);
 
-            obj.gui_sep_(ctrl, 0.462);
+            obj.H.btn_play_vad = uicontrol(ctrl, 'Style', 'togglebutton', ...
+                'Value', double(obj.play_vad_on), ...
+                'String', 'Play VAD Speech: OFF', ...
+                'FontSize', 9, ...
+                'BackgroundColor', [0.22 0.22 0.22], ...
+                'ForegroundColor', [0.60 0.60 0.60], ...
+                'Units', 'normalized', 'Position', [0.05 0.547 0.90 0.045], ...
+                'Callback', @(src,~) obj.cb_play_vad_(src));
+
+            obj.H.btn_play_mwf = uicontrol(ctrl, 'Style', 'togglebutton', ...
+                'Value', double(obj.play_mwf_on), ...
+                'String', 'Play MWF: OFF', ...
+                'FontSize', 9, ...
+                'BackgroundColor', [0.22 0.22 0.22], ...
+                'ForegroundColor', [0.60 0.60 0.60], ...
+                'Units', 'normalized', 'Position', [0.05 0.495 0.90 0.045], ...
+                'Callback', @(src,~) obj.cb_play_mwf_(src));
+
+            obj.gui_sep_(ctrl, 0.483);
+
+            % --- Recording ---
+            obj.H.btn_record = uicontrol(ctrl, 'Style', 'togglebutton', ...
+                'String', 'Record: OFF', ...
+                'FontSize', 9, 'FontWeight', 'bold', ...
+                'BackgroundColor', [0.22 0.22 0.22], ...
+                'ForegroundColor', [0.60 0.60 0.60], ...
+                'Units', 'normalized', 'Position', [0.05 0.428 0.90 0.045], ...
+                'Callback', @(src,~) obj.cb_record_(src));
+
+            obj.gui_sep_(ctrl, 0.418);
 
             % --- Scene summary ---
             bpf = round(cfg.drone_rpm * cfg.drone_blades / 60);
             gstr = sprintf([ ...
+                'Wiring     : %s\n' ...
+                'Composite  : %s\n' ...
                 'Human      : %.0f cm\n' ...
                 'Mouth z    : %.2f m\n' ...
                 'Drone AGL  : %.2f m\n' ...
@@ -194,24 +227,32 @@ classdef SimulatorUI < handle
                 'Asphalt R  : %.2f\n' ...
                 'BPF        : %d Hz\n' ...
                 'Mic spacing: %.0f cm\n' ...
+                'Speech gain: %.2f\n' ...
+                'Drone gain : %.2f\n' ...
+                'Env gain   : %.2f\n' ...
                 'VAD        : %s'], ...
+                obj.mixer.mode, obj.mixer.composite_kind, ...
                 cfg.human_height*100, cfg.mouth_height, obj.geo.drone_agl, ...
                 norm(obj.geo.pos_drone - obj.geo.pos_human), cfg.ground_R, ...
-                bpf, cfg.mic_spacing*100, obj.vad.backend_name);
+                bpf, cfg.mic_spacing*100, ...
+                obj.geo.gains_speech(cfg.mwf.ref_mic), ...
+                obj.geo.gains_drone(cfg.mwf.ref_mic), ...
+                obj.geo.gains_env(cfg.mwf.ref_mic), ...
+                obj.vad.backend_name);
             uicontrol(ctrl, 'Style', 'text', 'String', gstr, ...
                 'FontSize', 8, 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.50 0.78 0.50], ...
-                'Units', 'normalized', 'Position', [0.03 0.235 0.94 0.220], ...
+                'Units', 'normalized', 'Position', [0.03 0.170 0.94 0.242], ...
                 'HorizontalAlignment', 'left');
 
-            obj.gui_sep_(ctrl, 0.222);
+            obj.gui_sep_(ctrl, 0.160);
 
             obj.H.lbl_status = uicontrol(ctrl, 'Style', 'text', ...
                 'String', sprintf('Idle\nfs=%d Hz\nframe=%d smp', ...
                                   cfg.fs, cfg.frame_size), ...
                 'FontSize', 8, 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.50 0.50 0.50], ...
-                'Units', 'normalized', 'Position', [0.03 0.01 0.94 0.205], ...
+                'Units', 'normalized', 'Position', [0.03 0.01 0.94 0.145], ...
                 'HorizontalAlignment', 'left');
         end
 
@@ -255,7 +296,8 @@ classdef SimulatorUI < handle
             clim(obj.H.ax_spec_noisy, [-80 -20]);
             axis(obj.H.ax_spec_noisy, 'xy');
             ylabel(obj.H.ax_spec_noisy, 'Freq (kHz)', 'Color', [0.5 0.5 0.5]);
-            title(obj.H.ax_spec_noisy, 'Spectrogram — Noisy (Mic 1)', ...
+            title(obj.H.ax_spec_noisy, ...
+                  'Spectrogram — Noisy Composite (Speech + Drone + Env)', ...
                   'Color', 'w', 'FontSize', 9, 'FontWeight', 'bold');
 
             obj.H.himg_mwf = imagesc(obj.H.ax_spec_mwf, 1:obj.spec_ncols, frq, ...
@@ -274,6 +316,7 @@ classdef SimulatorUI < handle
 
             mc = {[0.00 0.78 0.32], [0.00 0.55 0.95], [1.00 0.52 0.00], ...
                   [0.95 0.35 0.75], [0.60 0.85 0.20]};
+            per_channel = strcmpi(obj.mixer.mode, 'perChannel');
             obj.H.ax_wav = gobjects(cfg.n_mics, 1);
             obj.H.hlines = gobjects(cfg.n_mics, 1);
             for m = 1:cfg.n_mics
@@ -288,13 +331,19 @@ classdef SimulatorUI < handle
                 grid(obj.H.ax_wav(m), 'on');
                 ylim(obj.H.ax_wav(m), [-1.05 1.05]);
                 xlim(obj.H.ax_wav(m), [1 N]);
-                ylabel(obj.H.ax_wav(m), sprintf('Mic %d', m), ...
+                ylabel(obj.H.ax_wav(m), mic_label_(per_channel, m), ...
                        'Color', mc{idx}, 'FontSize', 9);
                 obj.H.hlines(m) = plot(obj.H.ax_wav(m), 1:N, zeros(N, 1), ...
                     'Color', mc{idx}, 'LineWidth', 0.75);
                 if m == 1
-                    title(obj.H.ax_wav(m), ...
-                        sprintf('Live Noisy Waveforms (MacBook %d-mic virtual array)', cfg.n_mics), ...
+                    if per_channel
+                        ttl = ['Per-Mic Sources  (Mic 1 = Speech + Drone + Env  ·  ' ...
+                               'Mic 2 = Drone  ·  Mic 3 = Env  ·  Mic 1 feeds VAD)'];
+                    else
+                        ttl = sprintf(['Physical %d-Mic Array  (every mic receives ' ...
+                                       'speech+drone+env with TDOA + 1/d gain)'], cfg.n_mics);
+                    end
+                    title(obj.H.ax_wav(m), ttl, ...
                         'Color', 'w', 'FontSize', 9, 'FontWeight', 'bold');
                 end
             end
@@ -370,44 +419,66 @@ classdef SimulatorUI < handle
                 return;
             end
 
-            mic = expand_channels(raw, obj.geo, cfg.n_mics);
-
+            % --- Three physical sources feeding the array ---
+            speech = raw(:, 1);                             % live MacBook mic
             if obj.drone_on
-                chunk = obj.audio.next_drone_chunk(N);
-                mic = mic + obj.drone_gain * repmat(chunk, 1, cfg.n_mics);
+                drone = obj.drone_gain * obj.audio.next_drone_chunk(N);
+            else
+                drone = zeros(N, 1);
             end
             if obj.env_on
-                chunk = obj.audio.next_env_chunk(N);
-                mic = mic + obj.env_gain * repmat(chunk, 1, cfg.n_mics);
+                envn  = obj.env_gain * obj.audio.next_env_chunk(N);
+            else
+                envn  = zeros(N, 1);
             end
 
-            % --- VAD on reference mic ---
-            ref = mic(:, cfg.mwf.ref_mic);
-            [is_speech, vad_score] = obj.vad.step(ref); %#ok<ASGLU>
+            mic = obj.mixer.mix(speech, drone, envn);
 
-            % --- MWF (pass-through for now) ---
+            % --- Composite feed for the VAD (sum / mean of all mics) ---
+            comp = obj.mixer.composite(mic);
+
+            % --- VAD on the composite (three-source mix in perChannel mode) ---
+            [is_speech, ~] = obj.vad.step(comp);
+
+            % --- MWF (pass-through stub) ---
             y_enh = obj.mwf.step(mic, is_speech);
 
-            % --- Playback ---
+            % --- User-gated playback (no automatic noisy output) ---
             if cfg.playback.enabled
-                if strcmpi(obj.playback_source, 'enhanced')
-                    out = y_enh;
-                else
-                    out = mean(mic, 2);
+                out = zeros(N, 1);
+                if obj.play_vad_on && is_speech
+                    out = out + comp;
                 end
-                obj.audio.play(out);
+                if obj.play_mwf_on
+                    out = out + y_enh;
+                end
+                if obj.play_vad_on || obj.play_mwf_on
+                    obj.audio.play(out);
+                end
             end
 
-            obj.update_buffers_(mic, y_enh);
+            % --- Recording (independent of VAD / MWF) ---
+            if obj.recording
+                switch lower(cfg.record.source)
+                    case 'raw_mic'
+                        obj.audio.rec_write(speech);
+                    case 'speech'
+                        obj.audio.rec_write(mic(:, 1));
+                    otherwise   % 'composite' (default)
+                        obj.audio.rec_write(comp);
+                end
+            end
+
+            obj.update_buffers_(comp, y_enh);
             obj.refresh_display_(mic, y_enh);
         end
 
-        function update_buffers_(obj, mic, y_enh)
+        function update_buffers_(obj, comp, y_enh)
             N   = obj.Cfg.frame_size;
             nb  = N/2 + 1;
             w   = hann(N, 'periodic');
-            Xn  = abs(fft(mic(:, 1) .* w, N));
-            Xm  = abs(fft(y_enh      .* w, N));
+            Xn  = abs(fft(comp  .* w, N));
+            Xm  = abs(fft(y_enh .* w, N));
             obj.spec_buf_noisy(:, obj.spec_col) = Xn(1:nb);
             obj.spec_buf_mwf  (:, obj.spec_col) = Xm(1:nb);
             obj.spec_col = mod(obj.spec_col, obj.spec_ncols) + 1;
@@ -439,7 +510,6 @@ classdef SimulatorUI < handle
             set(obj.H.himg_mwf,   'CData', 20*log10(obj.spec_buf_mwf   + 1e-12));
 
             set(obj.H.h_vad_line, 'YData', obj.vad_trace);
-            % shade regions where flags==true (drawn as alternating strips)
             obj.update_vad_shade_();
             drawnow limitrate;
         end
@@ -458,7 +528,6 @@ classdef SimulatorUI < handle
                 set(obj.H.h_vad_shade, 'XData', [1 1 1 1], 'YData', [0 0 0 0]);
                 return;
             end
-            % Build a faces/vertices patch
             nseg = numel(starts);
             Xs = zeros(4, nseg);
             Ys = zeros(4, nseg);
@@ -538,15 +607,54 @@ classdef SimulatorUI < handle
             end
         end
 
-        function cb_playback_(obj, src)
-            if src.Value == 1
-                obj.playback_source = 'enhanced';
-                src.String = 'Play: Enhanced (MWF)';
-                src.BackgroundColor = [0.15 0.45 0.70];
+        function cb_play_vad_(obj, src)
+            obj.play_vad_on = logical(src.Value);
+            if obj.play_vad_on
+                src.String = 'Play VAD Speech: ON';
+                src.BackgroundColor = [0.15 0.60 0.30];
+                src.ForegroundColor = 'w';
             else
-                obj.playback_source = 'noisy';
-                src.String = 'Play: Noisy Mix';
-                src.BackgroundColor = [0.35 0.35 0.35];
+                src.String = 'Play VAD Speech: OFF';
+                src.BackgroundColor = [0.22 0.22 0.22];
+                src.ForegroundColor = [0.60 0.60 0.60];
+            end
+        end
+
+        function cb_play_mwf_(obj, src)
+            obj.play_mwf_on = logical(src.Value);
+            if obj.play_mwf_on
+                src.String = 'Play MWF: ON';
+                src.BackgroundColor = [0.15 0.45 0.70];
+                src.ForegroundColor = 'w';
+            else
+                src.String = 'Play MWF: OFF';
+                src.BackgroundColor = [0.22 0.22 0.22];
+                src.ForegroundColor = [0.60 0.60 0.60];
+            end
+        end
+
+        function cb_record_(obj, src)
+            want_on = logical(src.Value);
+            if want_on && ~obj.recording
+                path = obj.audio.rec_start();
+                if isempty(path)
+                    set(src, 'Value', 0);
+                    warndlg('Could not open recording file.', 'Q-WiSE');
+                    return;
+                end
+                obj.recording = true;
+                src.String = 'Record: ● REC';
+                src.BackgroundColor = [0.78 0.10 0.10];
+                src.ForegroundColor = 'w';
+            elseif ~want_on && obj.recording
+                path = obj.audio.rec_stop();
+                obj.recording = false;
+                src.String = 'Record: OFF';
+                src.BackgroundColor = [0.22 0.22 0.22];
+                src.ForegroundColor = [0.60 0.60 0.60];
+                if ~isempty(path)
+                    fprintf('[Q-WiSE] WAV saved to %s\n', path);
+                end
             end
         end
 
@@ -555,6 +663,13 @@ classdef SimulatorUI < handle
         end
 
         function on_delete_(obj)
+            try
+                if obj.recording
+                    obj.audio.rec_stop();
+                    obj.recording = false;
+                end
+            catch
+            end
             try
                 if ~isempty(obj.timerObj) && isvalid(obj.timerObj)
                     stop(obj.timerObj);
@@ -567,11 +682,17 @@ classdef SimulatorUI < handle
     end
 end
 
-% -------------------- module helpers --------------------
-function s = ternary_str(cond, a, b)
-    if cond, s = a; else, s = b; end
-end
-
-function v = ternary_vec(cond, a, b)
-    if cond, v = a; else, v = b; end
+% ---------------------------------------------------------------------
+function s = mic_label_(per_channel, m)
+%MIC_LABEL_  Friendly ylabel for each mic row based on wiring mode.
+    if per_channel
+        switch m
+            case 1, s = 'Mic 1  Noisy';   % speech + drone + env
+            case 2, s = 'Mic 2  Drone';
+            case 3, s = 'Mic 3  Env';
+            otherwise, s = sprintf('Mic %d  Noisy·τ', m);
+        end
+    else
+        s = sprintf('Mic %d', m);
+    end
 end
