@@ -66,7 +66,7 @@ def _pick_feeds(in_names, x, state, sr):
     ``RuntimeError: Unable to handle object of type <class
     'numpy.int64'>``; it requires ``numpy.ndarray`` for every feed.
     Wrapping ``sr`` with ``np.asarray(..., dtype=np.int64)`` returns a
-    0-D ndarray that ORT accepts for Silero's scalar ``sr`` input.
+    0-D ndarray that ORT accepts for the model's scalar ``sr`` input.
     """
     feeds = {}
     sr_arr = np.asarray(int(sr), dtype=np.int64)
@@ -82,7 +82,7 @@ def _pick_feeds(in_names, x, state, sr):
 
 
 def step(path, x, state, context, sr):
-    """Run one Silero inference step.
+    """Run one Q-WiSE VAD inference step.
 
     MATLAB serializes arrays column-major (Fortran order); we reshape
     the incoming flat state with ``order='F'`` to recover the logical
@@ -100,13 +100,13 @@ def step(path, x, state, context, sr):
     new_chunk = np.asarray(x, dtype=np.float32).reshape(-1)
     if new_chunk.size != 512:
         raise ValueError(
-            f"silero_ort_helper.step expects 512-sample chunks, got "
+            f"qwise_ort_helper.step expects 512-sample chunks, got "
             f"{new_chunk.size}")
 
     ctx = np.asarray(context, dtype=np.float32).reshape(-1)
     if ctx.size != CONTEXT_SIZE:
         raise ValueError(
-            f"silero_ort_helper.step expects {CONTEXT_SIZE}-sample "
+            f"qwise_ort_helper.step expects {CONTEXT_SIZE}-sample "
             f"context, got {ctx.size}")
 
     x_in = np.ascontiguousarray(

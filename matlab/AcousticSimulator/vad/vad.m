@@ -4,7 +4,7 @@ classdef vad < handle
 %   obj = vad(cfg)
 %
 %   Selects a backend according to cfg.vad.backend:
-%       'silero' : force the neural ONNX backend (falls back if it
+%       'qwise'  : force the neural ONNX backend (falls back if it
 %                  cannot be loaded)
 %       'energy' : force the statistical fallback
 %       'auto'   : try the neural backend, else fall back   <-- default
@@ -35,8 +35,8 @@ classdef vad < handle
             obj.flags    = false(obj.hist_len, 1);
 
             switch lower(cfg.vad.backend)
-                case 'silero'
-                    s = VADSilero(cfg);
+                case 'qwise'
+                    s = VADQwise(cfg);
                     if s.ready
                         obj.backend = s;
                         obj.backend_name = 'qwise-vad';
@@ -50,7 +50,7 @@ classdef vad < handle
                     obj.backend = VADEnergy(cfg);
                     obj.backend_name = 'energy';
                 otherwise   % 'auto'
-                    s = VADSilero(cfg);
+                    s = VADQwise(cfg);
                     if s.ready
                         obj.backend = s;
                         obj.backend_name = 'qwise-vad';

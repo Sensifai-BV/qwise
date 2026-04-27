@@ -1,19 +1,19 @@
-function setup_silero_python(varargin)
-%SETUP_SILERO_PYTHON  Configure MATLAB's pyenv to use the Q-WiSE venv.
+function setup_qwise_python(varargin)
+%SETUP_QWISE_PYTHON  Configure MATLAB's pyenv to use the Q-WiSE venv.
 %
-%   setup_silero_python()
+%   setup_qwise_python()
 %     Creates <project>/.pyenv if missing, installs numpy + onnxruntime,
 %     and points MATLAB's pyenv at the venv in OutOfProcess mode so the
 %     neural VAD backend can load its ONNX model through onnxruntime.
 %
-%   setup_silero_python('Rebuild', true)
+%   setup_qwise_python('Rebuild', true)
 %     Delete and re-create the venv from scratch.
 %
 %   IMPORTANT: pyenv can only be changed when Python is NOT yet loaded in
 %   this MATLAB session.  If Python is already loaded (e.g. because any
 %   py.* call has run), MATLAB will refuse to switch.  In that case:
 %       - restart MATLAB,
-%       - call ``setup_silero_python`` as the FIRST thing you do,
+%       - call ``setup_qwise_python`` as the FIRST thing you do,
 %       - then run the simulator.
 %
 %   R2025b officially supports Python 3.9–3.12.  Homebrew's Python 3.14 is
@@ -47,7 +47,7 @@ function setup_silero_python(varargin)
         end
     end
     if isempty(sys_py)
-        error('QWiSE:Silero:NoSystemPython', ...
+        error('QWiSE:Setup:NoSystemPython', ...
             ['No supported system Python (3.9–3.12) found. Install ' ...
              'via Homebrew: brew install python@3.12']);
     end
@@ -61,12 +61,12 @@ function setup_silero_python(varargin)
         fprintf('[Q-WiSE] Creating venv %s (using %s)\n', venv_dir, sys_py);
         [st, out] = system(sprintf('"%s" -m venv "%s" 2>&1', sys_py, venv_dir));
         if st ~= 0
-            error('QWiSE:Silero:VenvFailed', ...
+            error('QWiSE:Setup:VenvFailed', ...
                 'venv creation failed: %s', out);
         end
     end
     if ~isfile(venv_py)
-        error('QWiSE:Silero:NoVenvPython', ...
+        error('QWiSE:Setup:NoVenvPython', ...
             'Expected python binary not found: %s', venv_py);
     end
 
@@ -74,11 +74,11 @@ function setup_silero_python(varargin)
     fprintf('[Q-WiSE] Ensuring numpy + onnxruntime are installed in venv...\n');
     [st, out] = system(sprintf( ...
         '"%s" -m pip install --upgrade pip 2>&1', venv_py));
-    if st ~= 0, warning('QWiSE:Silero:PipUpgrade', 'pip upgrade: %s', out); end
+    if st ~= 0, warning('QWiSE:Setup:PipUpgrade', 'pip upgrade: %s', out); end
     [st, out] = system(sprintf( ...
         '"%s" -m pip install --upgrade numpy onnxruntime 2>&1', venv_py));
     if st ~= 0
-        error('QWiSE:Silero:PipInstall', ...
+        error('QWiSE:Setup:PipInstall', ...
             'pip install failed:\n%s', out);
     end
 
@@ -86,10 +86,10 @@ function setup_silero_python(varargin)
     e = pyenv();
     if strcmpi(char(e.Status), 'Loaded') && ...
        ~strcmp(e.Executable, venv_py)
-        error('QWiSE:Silero:PyEnvLocked', ...
+        error('QWiSE:Setup:PyEnvLocked', ...
             ['Python is already loaded in this MATLAB session\n' ...
              '  (current: %s,  status: %s).\n' ...
-             'Restart MATLAB and call ''setup_silero_python'' as the ' ...
+             'Restart MATLAB and call ''setup_qwise_python'' as the ' ...
              'FIRST command so the env can be switched.'], ...
             e.Executable, char(e.Status));
     end

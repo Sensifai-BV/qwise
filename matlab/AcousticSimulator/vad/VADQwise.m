@@ -1,5 +1,5 @@
-classdef VADSilero < handle
-%VADSILERO  Q-WiSE neural VAD ONNX wrapper with graceful multi-API fallback.
+classdef VADQwise < handle
+%VADQWISE  Q-WiSE neural VAD ONNX wrapper with graceful multi-API fallback.
 %
 %   Attempts to load <cfg.vad.onnx_path> via whichever ONNX importer is
 %   available in the current MATLAB release.  In order of preference:
@@ -33,22 +33,22 @@ classdef VADSilero < handle
         dag_net                % DAGNetwork (backend = 'dagnet')
         state                  % single [2 x 1 x 128]
         ctx                    % single [64 x 1] — audio context window
-        fn_name    = 'silero_vad_net'
+        fn_name    = 'qwise_vad_net'
         py_helper              % py.module (backend = 'pyort')
         py_path    = ''        % onnx path used for pyort lookup
     end
 
     properties (Constant, Access = private)
-        SILERO_CONTEXT = 64    % model expects 64-sample context prepended
+        QWISE_CONTEXT = 64    % model expects 64-sample context prepended
     end
 
     methods
-        function obj = VADSilero(cfg)
+        function obj = VADQwise(cfg)
             obj.cfg        = cfg.vad;
-            obj.frame_size = cfg.vad.silero_frame;
+            obj.frame_size = cfg.vad.qwise_frame;
             obj.sr         = int64(cfg.fs);
             obj.state      = zeros(2, 1, 128, 'single');
-            obj.ctx        = zeros(obj.SILERO_CONTEXT, 1, 'single');
+            obj.ctx        = zeros(obj.QWISE_CONTEXT, 1, 'single');
 
             onnx_path = cfg.vad.onnx_path;
             if ~isfile(onnx_path)
@@ -56,7 +56,7 @@ classdef VADSilero < handle
                 onnx_path = fullfile(proj_root, onnx_path);
             end
             if ~isfile(onnx_path)
-                warning('QWiSE:VAD:SileroMissing', ...
+                warning('QWiSE:VAD:Missing', ...
                     '[Q-WiSE] VAD ONNX model not found at %s', onnx_path);
                 return;
             end
@@ -67,7 +67,7 @@ classdef VADSilero < handle
             obj.maybe_switch_to_project_venv_();
             if obj.try_import_pyort_(onnx_path),      return; end
 
-            warning('QWiSE:VAD:SileroNoImporter', ...
+            warning('QWiSE:VAD:NoImporter', ...
                 ['[Q-WiSE] No ONNX importer could load %s. ' ...
                  'Install the Deep Learning Toolbox Converter for ONNX ' ...
                  '(Add-On Explorer) or ''pip install onnxruntime numpy'' ' ...
@@ -99,9 +99,9 @@ classdef VADSilero < handle
                     last_prob = obj.infer_chunk_(xf);
                 end
                 score     = double(last_prob);
-                is_speech = score > obj.cfg.silero_threshold;
+                is_speech = score > obj.cfg.qwise_threshold;
             catch ME
-                warning('QWiSE:VAD:SileroStepFailed', ...
+                warning('QWiSE:VAD:StepFailed', ...
                     '[Q-WiSE] VAD step failed: %s (disabling).', ...
                     ME.message);
                 obj.ready = false;
@@ -129,7 +129,7 @@ classdef VADSilero < handle
 
         function reset(obj)
             obj.state = zeros(2, 1, 128, 'single');
-            obj.ctx   = zeros(obj.SILERO_CONTEXT, 1, 'single');
+            obj.ctx   = zeros(obj.QWISE_CONTEXT, 1, 'single');
         end
     end
 
@@ -165,7 +165,7 @@ classdef VADSilero < handle
                     last_err = ME.message;
                 end
             end
-            warning('QWiSE:VAD:SileroDLNetFail', ...
+            warning('QWiSE:VAD:DLNetFail', ...
                 '[Q-WiSE] importNetworkFromONNX failed: %s', last_err);
         end
 
@@ -187,7 +187,7 @@ classdef VADSilero < handle
                     obj.backend_detail);
                 ok = true;
             catch ME
-                warning('QWiSE:VAD:SileroFnFail', ...
+                warning('QWiSE:VAD:OnnxFnFail', ...
                     '[Q-WiSE] importONNXFunction failed: %s', ME.message);
             end
         end
@@ -208,7 +208,7 @@ classdef VADSilero < handle
                     obj.backend_detail);
                 ok = true;
             catch ME
-                warning('QWiSE:VAD:SileroDagFail', ...
+                warning('QWiSE:VAD:DagFail', ...
                     '[Q-WiSE] importONNXNetwork failed: %s', ME.message);
             end
         end
@@ -216,7 +216,7 @@ classdef VADSilero < handle
         function maybe_switch_to_project_venv_(~)
         %MAYBE_SWITCH_TO_PROJECT_VENV_  Best-effort pyenv autoswitch.
         %   If the project ships a .pyenv venv (created by
-        %   setup_silero_python.m) and MATLAB hasn't loaded any Python
+        %   setup_qwise_python.m) and MATLAB hasn't loaded any Python
         %   yet this session, point pyenv at it transparently so the
         %   user doesn't have to remember to run the setup script.
             try
@@ -227,9 +227,9 @@ classdef VADSilero < handle
                 if strcmp(e.Executable, vpy), return; end
                 if strcmpi(char(e.Status), 'Loaded')
                     % Can't switch mid-session; warn once with the recipe.
-                    warning('QWiSE:VAD:SileroPyEnvLocked', ...
+                    warning('QWiSE:VAD:PyEnvLocked', ...
                         ['[Q-WiSE] Python is already loaded as %s. ' ...
-                         'Run ''setup_silero_python'' as the FIRST ' ...
+                         'Run ''setup_qwise_python'' as the FIRST ' ...
                          'command after restarting MATLAB to switch ' ...
                          'to the project venv (%s) and enable the ' ...
                          'neural VAD backend.'], e.Executable, vpy);
@@ -238,7 +238,7 @@ classdef VADSilero < handle
                 pyenv('Version', vpy, 'ExecutionMode', 'OutOfProcess');
                 fprintf('[Q-WiSE] Switched pyenv to project venv: %s\n', vpy);
             catch ME
-                warning('QWiSE:VAD:SileroPyEnvAutoFail', ...
+                warning('QWiSE:VAD:PyEnvAutoFail', ...
                     '[Q-WiSE] Could not auto-switch pyenv: %s', ME.message);
             end
         end
@@ -253,7 +253,7 @@ classdef VADSilero < handle
                 py.importlib.import_module('numpy');
                 py.importlib.import_module('onnxruntime');
             catch ME
-                warning('QWiSE:VAD:SileroPyMissing', ...
+                warning('QWiSE:VAD:PyMissing', ...
                     ['[Q-WiSE] Python onnxruntime backend unavailable ' ...
                      '(%s). Install with: pyenv -> pip install ' ...
                      'onnxruntime numpy.'], ME.message);
@@ -265,7 +265,7 @@ classdef VADSilero < handle
                 if count(sys_mod.path, helper_dir) == 0
                     sys_mod.path.insert(int32(0), helper_dir);
                 end
-                helper = py.importlib.import_module('silero_ort_helper');
+                helper = py.importlib.import_module('qwise_ort_helper');
                 info = helper.load(onnx_path);
                 in_names = cellfun(@char, cell(info{'input_names'}), ...
                                    'UniformOutput', false);
@@ -279,7 +279,7 @@ classdef VADSilero < handle
                          '%s.\n'], obj.backend_detail);
                 ok = true;
             catch ME
-                warning('QWiSE:VAD:SileroPyORTFail', ...
+                warning('QWiSE:VAD:PyORTFail', ...
                     '[Q-WiSE] Python onnxruntime load failed: %s', ...
                     ME.message);
             end

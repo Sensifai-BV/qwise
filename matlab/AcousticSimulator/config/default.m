@@ -50,10 +50,10 @@ function cfg = default()
     cfg.mixer.composite = 'mic1';        % 'mic1' | 'sum' | 'mean'
 
     % ---------------- VAD --------------------------------------------
-    cfg.vad.backend           = 'silero';    % 'auto' | 'silero' | 'energy'
-    cfg.vad.onnx_path         = fullfile('vad','silero_vad.onnx');
-    cfg.vad.silero_frame      = 512;         % 32 ms @ 16 kHz — fixed by the VAD ONNX
-    cfg.vad.silero_threshold  = 0.50;
+    cfg.vad.backend           = 'qwise';     % 'auto' | 'qwise' | 'energy'
+    cfg.vad.onnx_path         = fullfile('vad','qwise_vad.onnx');
+    cfg.vad.qwise_frame       = 512;         % 32 ms @ 16 kHz — fixed by the VAD ONNX
+    cfg.vad.qwise_threshold   = 0.50;
     cfg.vad.energy_threshold  = -45;         % dBFS
     cfg.vad.sfm_threshold     = 0.45;        % spectral flatness
     cfg.vad.hang_frames       = 8;           % release hangover
