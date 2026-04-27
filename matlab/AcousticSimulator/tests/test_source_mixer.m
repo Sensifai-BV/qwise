@@ -118,49 +118,121 @@ end
 % ====================================================================
 function test_perchannel_mic_assignment(tc)
     cfg = pc_cfg_(tc);
-    mix = SourceMixer(cfg, tc.TestData.geo);
+    geo = tc.TestData.geo;
+    mix = SourceMixer(cfg, geo);
     N   = cfg.frame_size;
     s = randn(N,1); d = randn(N,1); e = randn(N,1);
     out = mix.mix(s, d, e);
+    g = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
     verifyEqual(tc, size(out), [N cfg.n_mics]);
-    verifyEqual(tc, out(:, 1), s + d + e, 'AbsTol', 1e-12);
-    verifyEqual(tc, out(:, 2), d,         'AbsTol', 1e-12);
-    verifyEqual(tc, out(:, 3), e,         'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 1), g*s + d + e, 'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 2), d,           'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 3), e,           'AbsTol', 1e-12);
 end
 
 function test_perchannel_default_composite_is_mic1(tc)
     cfg = pc_cfg_(tc);   % default 'mic1'
-    mix = SourceMixer(cfg, tc.TestData.geo);
+    geo = tc.TestData.geo;
+    mix = SourceMixer(cfg, geo);
     N   = cfg.frame_size;
     s = randn(N,1); d = randn(N,1); e = randn(N,1);
     out  = mix.mix(s, d, e);
     comp = mix.composite(out);
-    % composite is the laptop mic = the full noisy speech (no double-count)
-    verifyEqual(tc, comp, s + d + e, 'AbsTol', 1e-12);
+    g = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    % composite = laptop mic = distance-attenuated speech + drone + env
+    verifyEqual(tc, comp, g*s + d + e, 'AbsTol', 1e-12);
 end
 
 function test_perchannel_explicit_sum_composite(tc)
     cfg = pc_cfg_(tc);
     cfg.mixer.composite = 'sum';
-    mix = SourceMixer(cfg, tc.TestData.geo);
+    geo = tc.TestData.geo;
+    mix = SourceMixer(cfg, geo);
     N   = cfg.frame_size;
     s = randn(N,1); d = randn(N,1); e = randn(N,1);
     out  = mix.mix(s, d, e);
     comp = mix.composite(out);
-    % sum = mic1 + mic2 + mic3 = (s+d+e) + d + e
-    verifyEqual(tc, comp, s + 2*d + 2*e, 'AbsTol', 1e-12);
+    g = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    % sum = mic1 + mic2 + mic3 = (g*s + d + e) + d + e
+    verifyEqual(tc, comp, g*s + 2*d + 2*e, 'AbsTol', 1e-12);
 end
 
 function test_perchannel_explicit_mean_composite(tc)
     cfg = pc_cfg_(tc);
     cfg.mixer.composite = 'mean';
-    mix = SourceMixer(cfg, tc.TestData.geo);
+    geo = tc.TestData.geo;
+    mix = SourceMixer(cfg, geo);
     N   = cfg.frame_size;
     s = randn(N,1); d = randn(N,1); e = randn(N,1);
     out  = mix.mix(s, d, e);
     comp = mix.composite(out);
-    expected = ((s+d+e) + d + e) / cfg.n_mics;
+    g = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    expected = ((g*s + d + e) + d + e) / cfg.n_mics;
     verifyEqual(tc, comp, expected, 'AbsTol', 1e-12);
+end
+
+% --------------------------------------------------------------------
+%  Distance-band tests for the perChannel speech path.
+%  The speech level at mic-1 must follow the piecewise table in
+%  core/distance_to_gain.m (0.10–1 m → 0.95, 1–2 m → 0.75, 2–4 m → 0.50,
+%  4–6 m → 0.30, 6–8 m → 0.10, >8 m → 0.00). Drone/env on mic-2 and
+%  mic-3 must be unaffected.
+% --------------------------------------------------------------------
+function test_perchannel_speech_attenuates_close(tc)
+    cfg = pc_cfg_(tc);
+    cfg.slant_dist = 0.5;                       % well inside the 0–1 m band
+    geo = build_geometry(cfg);
+    mix = SourceMixer(cfg, geo);
+    N   = cfg.frame_size;
+    s   = randn(N,1);
+    out = mix.mix(s, zeros(N,1), zeros(N,1));
+    g_expected = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    verifyEqual(tc, g_expected, 0.95, 'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 1), g_expected * s, 'AbsTol', 1e-12);
+end
+
+function test_perchannel_speech_attenuates_mid(tc)
+    cfg = pc_cfg_(tc);
+    cfg.slant_dist = 3.5;                       % the 2–4 m band → 0.50
+    geo = build_geometry(cfg);
+    mix = SourceMixer(cfg, geo);
+    N   = cfg.frame_size;
+    s   = randn(N,1);
+    out = mix.mix(s, zeros(N,1), zeros(N,1));
+    g_expected = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    verifyEqual(tc, g_expected, 0.50, 'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 1), g_expected * s, 'AbsTol', 1e-12);
+end
+
+function test_perchannel_speech_silenced_far(tc)
+    cfg = pc_cfg_(tc);
+    cfg.slant_dist = 9.0;                       % beyond 8 m → 0.00
+    geo = build_geometry(cfg);
+    mix = SourceMixer(cfg, geo);
+    N   = cfg.frame_size;
+    s   = randn(N,1);
+    out = mix.mix(s, zeros(N,1), zeros(N,1));
+    g_expected = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
+    verifyEqual(tc, g_expected, 0.00, 'AbsTol', 1e-12);
+    verifyEqual(tc, out(:, 1), zeros(N,1), 'AbsTol', 1e-12);
+end
+
+function test_perchannel_drone_and_env_mics_unaffected_by_distance(tc)
+    % mic-2 (drone) and mic-3 (env) must remain noise-only references
+    % regardless of the human-to-drone distance.
+    for d_slant = [0.5, 3.5, 9.0]
+        cfg = pc_cfg_(tc);
+        cfg.slant_dist = d_slant;
+        geo = build_geometry(cfg);
+        mix = SourceMixer(cfg, geo);
+        N   = cfg.frame_size;
+        s = randn(N,1); d = randn(N,1); e = randn(N,1);
+        out = mix.mix(s, d, e);
+        verifyEqual(tc, out(:, 2), d, 'AbsTol', 1e-12, ...
+            sprintf('mic-2 polluted at slant=%.2f m', d_slant));
+        verifyEqual(tc, out(:, 3), e, 'AbsTol', 1e-12, ...
+            sprintf('mic-3 polluted at slant=%.2f m', d_slant));
+    end
 end
 
 function cfg = pc_cfg_(tc)

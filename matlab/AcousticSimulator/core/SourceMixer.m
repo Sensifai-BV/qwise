@@ -124,13 +124,24 @@ classdef SourceMixer < handle
         %MIX_PER_CHANNEL_  mic-1 captures the whole scene; mic-2/3 are
         %   noise-only references, which is the configuration the MWF
         %   needs (one noisy ref + dedicated noise observations).
-        %       mic-1 = speech + drone + env  (laptop mic, realistic)
+        %       mic-1 = g_d * speech + drone + env  (laptop mic, outdoor)
         %       mic-2 = drone
         %       mic-3 = env
+        %   The speech term on mic-1 is attenuated by distance_to_gain
+        %   evaluated at the human-to-ref-mic distance, so the simulator
+        %   behaves like a real outdoor scene: as the human moves farther
+        %   from the drone the captured speech level drops in steps
+        %   (see core/distance_to_gain.m for the band table). Drone and
+        %   environment channels are NOT touched by the speech-distance
+        %   gain — they keep their user-slider levels and remain valid
+        %   noise-only references for the MWF.
+        %
         %   Extra mics (n_mics > 3) replay the noisy speech with per-mic
         %   speech TDOA so a larger ULA can still be exercised.
             mic = zeros(N, obj.n_mics);
-            full = speech + drone + env;            % realistic noisy speech
+            ref = obj.ref_mic_();
+            g_speech = distance_to_gain(obj.geo.dist_speech(ref));
+            full = g_speech * speech + drone + env;     % outdoor noisy mic
             if obj.n_mics >= 1
                 mic(:, 1) = full;
             end
@@ -161,6 +172,16 @@ classdef SourceMixer < handle
     end
 
     methods (Access = private)
+        function ref = ref_mic_(obj)
+        %REF_MIC_  Index of the reference (laptop) microphone — the
+        %   channel that carries the realistic noisy speech in
+        %   perChannel mode. Defaults to 1 if cfg.mwf.ref_mic is absent.
+            ref = 1;
+            if isfield(obj.cfg, 'mwf') && isfield(obj.cfg.mwf, 'ref_mic')
+                ref = obj.cfg.mwf.ref_mic;
+            end
+        end
+
         function y = tap_(obj, hist, src, tau)
         %TAP_  Produce a length-N block delayed by TAU samples.
         %   Samples older than N come from the history ring; newer ones

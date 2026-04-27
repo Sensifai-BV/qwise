@@ -19,7 +19,7 @@ function cfg = default()
     % ---------------- Scene geometry ---------------------------------
     cfg.human_height    = 1.70;          % m
     cfg.mouth_height    = 0.88 * cfg.human_height;
-    cfg.slant_dist      = 3.50;          % m, speaker-to-drone slant
+    cfg.slant_dist      = 5.00;          % m, speaker-to-drone slant
     cfg.elev_deg        = 30;            % deg, elevation of drone
     cfg.drone_rpm       = 8000;
     cfg.drone_blades    = 3;
@@ -33,8 +33,8 @@ function cfg = default()
     cfg.drone_wav_path  = fullfile('wavs','drone_fan.wav');
     cfg.env_wav_path    = fullfile('wavs','env_ambient.wav');
     cfg.speech_gain_init= 1.00;          % live-mic speech level at mic-1
-    cfg.drone_gain_init = 0.40;
-    cfg.env_gain_init   = 0.25;
+    cfg.drone_gain_init = 0.03;
+    cfg.env_gain_init   = 0.01;
 
     % ---------------- Array wiring -----------------------------------
     %   'perChannel' : mic-1 = laptop speech + drone + env  (realistic
