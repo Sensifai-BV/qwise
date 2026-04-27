@@ -12,8 +12,8 @@ function out = expand_channels(raw, geo, n_mics)
 %     out    [N x n_mics]  per-mic time-delayed replicas.
 %
 %   If the hardware has >= 2 channels they are wired to the outer mics
-%   directly (so a stereo MacBook feed still sounds natural) and the
-%   middle mic(s) stay as delayed copies of channel 1.
+%   directly (so a stereo capture stays natural) and the middle mic(s)
+%   stay as delayed copies of channel 1.
 
     N   = size(raw, 1);
     out = zeros(N, n_mics);

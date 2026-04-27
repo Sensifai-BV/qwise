@@ -4,7 +4,7 @@ classdef VADEnergy < handle
 %   Lightweight, stateless-per-frame VAD that compares short-time energy
 %   (dBFS) and spectral flatness against thresholds from cfg.vad.* and
 %   smooths the output with a hangover release counter.  Used whenever
-%   the Silero ONNX backend cannot be imported.
+%   the Q-WiSE neural VAD backend cannot be loaded.
 
     properties
         cfg

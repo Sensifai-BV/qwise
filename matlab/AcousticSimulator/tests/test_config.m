@@ -50,7 +50,7 @@ function test_required_fields_present(tc)
     end
     % mic_model is intentionally gone — do not resurrect it.
     verifyFalse(tc, isfield(cfg, 'mic_model'), ...
-        'cfg.mic_model must be removed — find_mac_mic() auto-detects now.');
+        'cfg.mic_model must be removed — find_input_mic() auto-detects now.');
 end
 
 function test_mixer_defaults_are_sane(tc)

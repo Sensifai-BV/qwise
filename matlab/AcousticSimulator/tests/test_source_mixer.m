@@ -112,7 +112,7 @@ end
 
 % ====================================================================
 %  Per-channel wiring tests  (cfg.mixer.mode = 'perChannel')
-%  mic-1 = speech + drone + env  (laptop mic captures the full scene)
+%  mic-1 = speech + drone + env  (input mic captures the full scene)
 %  mic-2 = drone                 (noise-only reference)
 %  mic-3 = env                   (noise-only reference)
 % ====================================================================
@@ -139,7 +139,7 @@ function test_perchannel_default_composite_is_mic1(tc)
     out  = mix.mix(s, d, e);
     comp = mix.composite(out);
     g = distance_to_gain(geo.dist_speech(cfg.mwf.ref_mic));
-    % composite = laptop mic = distance-attenuated speech + drone + env
+    % composite = input mic = distance-attenuated speech + drone + env
     verifyEqual(tc, comp, g*s + d + e, 'AbsTol', 1e-12);
 end
 

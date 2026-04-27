@@ -19,7 +19,7 @@ function cfg = default()
     % ---------------- Scene geometry ---------------------------------
     cfg.human_height    = 1.70;          % m
     cfg.mouth_height    = 0.88 * cfg.human_height;
-    cfg.slant_dist      = 5.00;          % m, speaker-to-drone slant
+    cfg.slant_dist      = 2.50;          % m, speaker-to-drone slant
     cfg.elev_deg        = 30;            % deg, elevation of drone
     cfg.drone_rpm       = 8000;
     cfg.drone_blades    = 3;
@@ -32,13 +32,13 @@ function cfg = default()
     % ---------------- Noise sources ----------------------------------
     cfg.drone_wav_path  = fullfile('wavs','drone_fan.wav');
     cfg.env_wav_path    = fullfile('wavs','env_ambient.wav');
-    cfg.speech_gain_init= 1.00;          % live-mic speech level at mic-1
+    cfg.speech_gain_init= 1.00;          % input-mic speech level at mic-1
     cfg.drone_gain_init = 0.03;
     cfg.env_gain_init   = 0.01;
 
     % ---------------- Array wiring -----------------------------------
-    %   'perChannel' : mic-1 = laptop speech + drone + env  (realistic
-    %                  noisy speech the laptop mic actually picks up)
+    %   'perChannel' : mic-1 = input speech + drone + env  (realistic
+    %                  noisy speech the input mic actually picks up)
     %                  mic-2 = drone wav   (noise-only reference)
     %                  mic-3 = env wav     (noise-only reference)
     %                  composite = mic-1 (already the full noisy mix)
@@ -52,7 +52,7 @@ function cfg = default()
     % ---------------- VAD --------------------------------------------
     cfg.vad.backend           = 'silero';    % 'auto' | 'silero' | 'energy'
     cfg.vad.onnx_path         = fullfile('vad','silero_vad.onnx');
-    cfg.vad.silero_frame      = 512;         % 32 ms @ 16 kHz (Silero spec)
+    cfg.vad.silero_frame      = 512;         % 32 ms @ 16 kHz — fixed by the VAD ONNX
     cfg.vad.silero_threshold  = 0.50;
     cfg.vad.energy_threshold  = -45;         % dBFS
     cfg.vad.sfm_threshold     = 0.45;        % spectral flatness
@@ -81,8 +81,8 @@ function cfg = default()
     % ---------------- Recording --------------------------------------
     cfg.record.dir            = 'recordings';
     cfg.record.prefix         = 'qwise';
-    % 'composite' : sum of all mic channels (laptop + drone + env)
-    % 'raw_mic'   : only the live laptop microphone signal
+    % 'composite' : sum of all mic channels (input + drone + env)
+    % 'raw_mic'   : only the live input microphone signal
     % 'speech'    : the speech channel (mic-1 post-gain)
     cfg.record.source         = 'composite';
 

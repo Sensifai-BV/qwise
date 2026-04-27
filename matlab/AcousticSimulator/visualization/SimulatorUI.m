@@ -420,7 +420,7 @@ classdef SimulatorUI < handle
             end
 
             % --- Three physical sources feeding the array ---
-            speech = raw(:, 1);                             % live MacBook mic
+            speech = raw(:, 1);                             % live input mic
             if obj.drone_on
                 drone = obj.drone_gain * obj.audio.next_drone_chunk(N);
             else

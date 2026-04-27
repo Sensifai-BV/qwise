@@ -1,12 +1,13 @@
 classdef vad < handle
-%VAD  Voice-activity-detector dispatcher with Silero ONNX + energy fallback.
+%VAD  Q-WiSE VAD dispatcher: ONNX neural backend + energy fallback.
 %
 %   obj = vad(cfg)
 %
 %   Selects a backend according to cfg.vad.backend:
-%       'silero' : force Silero (falls back if import fails)
-%       'energy' : force statistical fallback
-%       'auto'   : try Silero, else fall back      <-- default
+%       'silero' : force the neural ONNX backend (falls back if it
+%                  cannot be loaded)
+%       'energy' : force the statistical fallback
+%       'auto'   : try the neural backend, else fall back   <-- default
 %
 %   Each call to step(x) returns a logical is_speech decision and a
 %   soft score in [0,1] that the UI plots as a VAD trace.  A ring
@@ -14,8 +15,8 @@ classdef vad < handle
 
     properties
         cfg
-        backend            % VADSilero | VADEnergy
-        backend_name       % 'silero' | 'energy'
+        backend            % concrete VAD backend instance
+        backend_name       % 'qwise-vad' | 'energy'
         history            % [hist_len x 1] ring buffer of scores
         flags              % [hist_len x 1] ring buffer of bool decisions
         hist_len
@@ -38,9 +39,10 @@ classdef vad < handle
                     s = VADSilero(cfg);
                     if s.ready
                         obj.backend = s;
-                        obj.backend_name = 'silero';
+                        obj.backend_name = 'qwise-vad';
                     else
-                        warning('[Q-WiSE] Silero unavailable; using energy VAD.');
+                        warning(['[Q-WiSE] Neural VAD unavailable; ' ...
+                                 'falling back to energy VAD.']);
                         obj.backend = VADEnergy(cfg);
                         obj.backend_name = 'energy';
                     end
@@ -51,7 +53,7 @@ classdef vad < handle
                     s = VADSilero(cfg);
                     if s.ready
                         obj.backend = s;
-                        obj.backend_name = 'silero';
+                        obj.backend_name = 'qwise-vad';
                     else
                         obj.backend = VADEnergy(cfg);
                         obj.backend_name = 'energy';

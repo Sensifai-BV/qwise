@@ -2,14 +2,14 @@ classdef SourceMixer < handle
 %SOURCEMIXER  Three-source mixer supporting per-channel or physical wiring.
 %
 %   The Q-WiSE scene has three acoustic sources:
-%       1. Human speech    (live MacBook-mic capture)
+%       1. Human speech    (live input-mic capture)
 %       2. Drone-fan noise (wav loop)
 %       3. Environment     (wav loop)
 %
 %   Two wiring modes are offered via cfg.mixer.mode:
 %
 %   'perChannel'  (demo/default)
-%       mic-1  = speech + drone + env   (laptop mic captures the full
+%       mic-1  = speech + drone + env   (input mic captures the full
 %                                        scene — the realistic noisy
 %                                        speech the user actually hears)
 %       mic-2  = drone   (virtual drone-side reference, noise-only)
@@ -124,7 +124,7 @@ classdef SourceMixer < handle
         %MIX_PER_CHANNEL_  mic-1 captures the whole scene; mic-2/3 are
         %   noise-only references, which is the configuration the MWF
         %   needs (one noisy ref + dedicated noise observations).
-        %       mic-1 = g_d * speech + drone + env  (laptop mic, outdoor)
+        %       mic-1 = g_d * speech + drone + env  (input mic, outdoor)
         %       mic-2 = drone
         %       mic-3 = env
         %   The speech term on mic-1 is attenuated by distance_to_gain
@@ -173,7 +173,7 @@ classdef SourceMixer < handle
 
     methods (Access = private)
         function ref = ref_mic_(obj)
-        %REF_MIC_  Index of the reference (laptop) microphone — the
+        %REF_MIC_  Index of the reference (input) microphone — the
         %   channel that carries the realistic noisy speech in
         %   perChannel mode. Defaults to 1 if cfg.mwf.ref_mic is absent.
             ref = 1;

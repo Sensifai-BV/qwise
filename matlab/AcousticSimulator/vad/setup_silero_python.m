@@ -3,8 +3,8 @@ function setup_silero_python(varargin)
 %
 %   setup_silero_python()
 %     Creates <project>/.pyenv if missing, installs numpy + onnxruntime,
-%     and points MATLAB's pyenv at the venv in OutOfProcess mode so
-%     VADSilero can load Silero-VAD through Python's onnxruntime.
+%     and points MATLAB's pyenv at the venv in OutOfProcess mode so the
+%     neural VAD backend can load its ONNX model through onnxruntime.
 %
 %   setup_silero_python('Rebuild', true)
 %     Delete and re-create the venv from scratch.
@@ -102,5 +102,5 @@ function setup_silero_python(varargin)
     % ---- 5. Smoke test -----------------------------------------------
     py.importlib.import_module('numpy');
     py.importlib.import_module('onnxruntime');
-    fprintf('[Q-WiSE] numpy + onnxruntime load OK — Silero backend ready.\n');
+    fprintf('[Q-WiSE] numpy + onnxruntime load OK — neural VAD backend ready.\n');
 end

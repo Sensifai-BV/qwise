@@ -1,4 +1,4 @@
-"""Silero-VAD v5 ONNX inference helper for MATLAB's py.* bridge.
+"""Q-WiSE neural VAD ONNX inference helper for MATLAB's py.* bridge.
 
 MATLAB's ``Deep Learning Toolbox Converter for ONNX Model Format`` support
 package is not always available (importNetworkFromONNX /
@@ -9,8 +9,8 @@ The module keeps a small registry of loaded sessions keyed by path so the
 same session object survives between MATLAB ``step()`` calls without any
 ORT state threading through MATLAB.
 
-Silero v5 quirk
----------------
+Audio-context quirk
+-------------------
 The v5 ONNX model expects ``CONTEXT_SIZE = 64`` samples of audio context
 from the *previous* call prepended to each new 512-sample chunk; the
 input tensor is therefore (1, 576), not (1, 512). Feeding only 512
@@ -45,7 +45,7 @@ STATE_SIZE   = 2 * 1 * 128  # 256
 
 
 def load(path):
-    """Open a Silero-VAD ONNX model and cache the session."""
+    """Open the VAD ONNX model and cache the ORT session."""
     key = str(path)
     sess = ort.InferenceSession(key, providers=["CPUExecutionProvider"])
     in_names  = [i.name for i in sess.get_inputs()]
@@ -92,7 +92,7 @@ def step(path, x, state, context, sr):
     needs C-contiguous tensors.
 
     The 64-sample audio context is prepended to ``x`` before inference,
-    yielding the (1, 576) tensor Silero v5 expects, and the trailing 64
+    yielding the (1, 576) tensor the v5 model expects, and the trailing 64
     samples of ``x`` become the new context for the next call.
     """
     sess, in_names, out_names = _SESSIONS[str(path)]

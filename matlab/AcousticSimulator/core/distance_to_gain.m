@@ -2,10 +2,10 @@ function g = distance_to_gain(d)
 %DISTANCE_TO_GAIN  Piecewise outdoor speech-level mapping for the
 %   Q-WiSE perChannel demo path.
 %
-%   g = distance_to_gain(d) returns the speech level the simulated
-%   laptop microphone (mic-1) should observe when the human talker is
-%   D metres from the static drone. The mapping is the perceptual
-%   table the user specified for the outdoor demo:
+%   g = distance_to_gain(d) returns the speech level the input
+%   microphone (mic-1) should observe when the human talker is D metres
+%   from the static drone. The mapping is the perceptual table for the
+%   outdoor Q-WiSE demo:
 %
 %       0.10 m ≤ d ≤ 1.0  m → 0.95
 %       1.0  m  < d ≤ 2.0  m → 0.75

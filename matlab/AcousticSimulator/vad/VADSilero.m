@@ -1,5 +1,5 @@
 classdef VADSilero < handle
-%VADSILERO  Silero-VAD ONNX wrapper with graceful multi-API fallback.
+%VADSILERO  Q-WiSE neural VAD ONNX wrapper with graceful multi-API fallback.
 %
 %   Attempts to load <cfg.vad.onnx_path> via whichever ONNX importer is
 %   available in the current MATLAB release.  In order of preference:
@@ -7,14 +7,14 @@ classdef VADSilero < handle
 %     1. importNetworkFromONNX  (R2024b+)  — returns a dlnetwork that is
 %        evaluated with dlarray predict() calls.
 %     2. importONNXFunction     (pre-R2024b) — generates a standalone
-%        function stub in +silero_vad_imported.
+%        function stub.
 %     3. importONNXNetwork      (deprecated DAGNetwork path).
 %     4. Python onnxruntime via the MATLAB py.* bridge — used when none
 %        of the above are present (Deep Learning Toolbox Converter for
 %        ONNX not installed).  Requires Python + ``pip install onnxruntime
 %        numpy`` inside the interpreter MATLAB is configured with.
 %
-%   Silero v5 is stateful (LSTM), so the hidden state is carried between
+%   The model is stateful (LSTM), so the hidden state is carried between
 %   frames.  If none of the importers can load the model, obj.ready stays
 %   false and the dispatcher (vad.m) transparently swaps to VADEnergy.
 
@@ -32,14 +32,14 @@ classdef VADSilero < handle
         net_fn                 % function handle (backend = 'onnxfn')
         dag_net                % DAGNetwork (backend = 'dagnet')
         state                  % single [2 x 1 x 128]
-        ctx                    % single [64 x 1] — Silero v5 audio context
+        ctx                    % single [64 x 1] — audio context window
         fn_name    = 'silero_vad_net'
         py_helper              % py.module (backend = 'pyort')
         py_path    = ''        % onnx path used for pyort lookup
     end
 
     properties (Constant, Access = private)
-        SILERO_CONTEXT = 64    % v5 expects 64-sample context prepended
+        SILERO_CONTEXT = 64    % model expects 64-sample context prepended
     end
 
     methods
@@ -57,7 +57,7 @@ classdef VADSilero < handle
             end
             if ~isfile(onnx_path)
                 warning('QWiSE:VAD:SileroMissing', ...
-                    '[Q-WiSE] Silero ONNX not found at %s', onnx_path);
+                    '[Q-WiSE] VAD ONNX model not found at %s', onnx_path);
                 return;
             end
 
@@ -83,9 +83,9 @@ classdef VADSilero < handle
             end
             try
                 % The host frame (cfg.frame_size, e.g. 1024) is usually
-                % a multiple of obj.frame_size (512 for Silero). Process
-                % every Silero-sized sub-block and report the latest
-                % score; the LSTM state carries through naturally.
+                % a multiple of obj.frame_size (512 for the model). Process
+                % every model-sized sub-block and report the latest score;
+                % the LSTM state carries through naturally.
                 x = double(x(:));
                 Nx = numel(x);
                 Nf = obj.frame_size;
@@ -102,7 +102,7 @@ classdef VADSilero < handle
                 is_speech = score > obj.cfg.silero_threshold;
             catch ME
                 warning('QWiSE:VAD:SileroStepFailed', ...
-                    '[Q-WiSE] Silero step failed: %s (disabling).', ...
+                    '[Q-WiSE] VAD step failed: %s (disabling).', ...
                     ME.message);
                 obj.ready = false;
                 is_speech = false;
@@ -157,7 +157,7 @@ classdef VADSilero < handle
                         'importNetworkFromONNX (fmt=%s)', ...
                         strjoin(fmts{i}, ','));
                     obj.ready          = true;
-                    fprintf('[Q-WiSE] Silero-VAD loaded via %s.\n', ...
+                    fprintf('[Q-WiSE] Neural VAD loaded via %s.\n', ...
                         obj.backend_detail);
                     ok = true;
                     return;
@@ -183,7 +183,7 @@ classdef VADSilero < handle
                 obj.backend_tag    = 'onnxfn';
                 obj.backend_detail = 'importONNXFunction';
                 obj.ready          = true;
-                fprintf('[Q-WiSE] Silero-VAD loaded via %s.\n', ...
+                fprintf('[Q-WiSE] Neural VAD loaded via %s.\n', ...
                     obj.backend_detail);
                 ok = true;
             catch ME
@@ -204,7 +204,7 @@ classdef VADSilero < handle
                 obj.backend_tag    = 'dagnet';
                 obj.backend_detail = 'importONNXNetwork';
                 obj.ready          = true;
-                fprintf('[Q-WiSE] Silero-VAD loaded via %s.\n', ...
+                fprintf('[Q-WiSE] Neural VAD loaded via %s.\n', ...
                     obj.backend_detail);
                 ok = true;
             catch ME
@@ -231,8 +231,8 @@ classdef VADSilero < handle
                         ['[Q-WiSE] Python is already loaded as %s. ' ...
                          'Run ''setup_silero_python'' as the FIRST ' ...
                          'command after restarting MATLAB to switch ' ...
-                         'to the project venv (%s) and enable Silero.'], ...
-                        e.Executable, vpy);
+                         'to the project venv (%s) and enable the ' ...
+                         'neural VAD backend.'], e.Executable, vpy);
                     return;
                 end
                 pyenv('Version', vpy, 'ExecutionMode', 'OutOfProcess');
@@ -275,7 +275,7 @@ classdef VADSilero < handle
                 obj.backend_detail = sprintf('onnxruntime [%s]', ...
                     strjoin(in_names, ','));
                 obj.ready          = true;
-                fprintf(['[Q-WiSE] Silero-VAD loaded via Python ' ...
+                fprintf(['[Q-WiSE] Neural VAD loaded via Python ' ...
                          '%s.\n'], obj.backend_detail);
                 ok = true;
             catch ME
@@ -287,7 +287,7 @@ classdef VADSilero < handle
 
         function [prob, new_state] = run_pyort_(obj, xf)
         %RUN_PYORT_  One inference step through the Python helper.
-            % Silero v5 expects 64 samples of audio context prepended
+            % The model expects 64 samples of audio context prepended
             % to the new 512-sample chunk; obj.ctx tracks that context
             % across calls. MATLAB numeric arrays auto-convert to numpy
             % arrays via the py.* bridge in R2023b+; numpy handles the
@@ -305,7 +305,7 @@ classdef VADSilero < handle
         end
 
         function [prob, new_state] = run_dlnet_(obj, xf)
-        %RUN_DLNET_  Multi-input dlnetwork inference for Silero v5.
+        %RUN_DLNET_  Multi-input dlnetwork inference for the VAD model.
             x_dl  = dlarray(xf,        'BT');
             sr_dl = dlarray(single(obj.sr), 'B');
             st_dl = dlarray(obj.state, 'BCT');

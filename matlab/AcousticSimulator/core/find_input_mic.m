@@ -1,8 +1,8 @@
-function dev = find_mac_mic(preferred)
-%FIND_MAC_MIC  Locate the built-in microphone on an Apple machine.
+function dev = find_input_mic(preferred)
+%FIND_INPUT_MIC  Locate a built-in / preferred input microphone.
 %
-%   dev = find_mac_mic()                 keyword search over common names.
-%   dev = find_mac_mic('MacBook Pro')    tries a user keyword first.
+%   dev = find_input_mic()           keyword search over common device names.
+%   dev = find_input_mic('keyword')  tries the user keyword first.
 %
 %   Returns an empty string when no matching device is found; callers
 %   should then fall back to the system default input.
@@ -15,6 +15,9 @@ function dev = find_mac_mic(preferred)
             m = devs(contains(devs, preferred, 'IgnoreCase', true));
             if ~isempty(m), dev = m{1}; return; end
         end
+        % These keywords match the device names the OS reports on common
+        % platforms — the strings stay verbatim because they are matched
+        % against real audio-device descriptors, not user-facing text.
         kw = {'MacBook Pro Microphone', 'Built-in Microphone', ...
               'MacBook Air Microphone', 'Apple Silicon Microphone', ...
               'MacBook', 'Built-in', 'Built In Microphone'};

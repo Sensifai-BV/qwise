@@ -2,7 +2,7 @@ classdef AudioIO < handle
 %AUDIOIO  Real-time microphone reader + speaker writer + looping noise WAVs.
 %
 %   obj = AudioIO(cfg)
-%     Opens a MacBook built-in microphone (auto-detected via keyword list),
+%     Opens the default input microphone (auto-detected via keyword list),
 %     opens an audioDeviceWriter for low-latency playback, and preloads
 %     two looped noise buffers (drone fan + environment ambient).
 %
@@ -162,7 +162,7 @@ classdef AudioIO < handle
     methods (Access = private)
         function [adr, n_ch] = create_reader_(obj)
             c   = obj.cfg;
-            dev = find_mac_mic();
+            dev = find_input_mic();
             n_ch = probe_channels(dev, c.fs, c.frame_size, c.n_mics);
             try
                 if isempty(dev)
