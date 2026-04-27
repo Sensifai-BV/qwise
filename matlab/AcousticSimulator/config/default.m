@@ -70,14 +70,6 @@ function cfg = default()
     cfg.mwf.alpha_ss          = 0.88;        % Rss EMA (speech frames)
     cfg.mwf.passthrough       = true;        % <-- current stub behaviour
 
-    % ---------------- Playback (user-triggered only) -----------------
-    % The simulator NEVER pumps the raw/noisy mix to the speakers
-    % automatically (avoids acoustic feedback into the mic).  The two
-    % defaults below decide whether each listening toggle starts on.
-    cfg.playback.enabled      = true;
-    cfg.playback.vad_default  = false;       % Play VAD-gated noisy speech
-    cfg.playback.mwf_default  = false;       % Play MWF enhanced output
-
     % ---------------- Recording --------------------------------------
     cfg.record.dir            = 'recordings';
     cfg.record.prefix         = 'qwise';

@@ -39,8 +39,8 @@ classdef SimulatorUI < handle
         env_on          = false
         drone_gain
         env_gain
-        play_vad_on     = false   % emit VAD-gated noisy speech to speakers
-        play_mwf_on     = false   % emit MWF-enhanced speech to speakers
+        vad_on          = false   % run VAD stage in the pipeline
+        mwf_on          = false   % run MWF stage in the pipeline (requires VAD)
         recording       = false   % is a WAV capture in progress
     end
 
@@ -65,8 +65,8 @@ classdef SimulatorUI < handle
 
             obj.drone_gain       = cfg.drone_gain_init;
             obj.env_gain         = cfg.env_gain_init;
-            obj.play_vad_on      = cfg.playback.vad_default;
-            obj.play_mwf_on      = cfg.playback.mwf_default;
+            obj.vad_on           = false;
+            obj.mwf_on           = false;
             obj.spec_ncols       = cfg.ui.spec_ncols;
 
             N   = cfg.frame_size;
@@ -177,30 +177,30 @@ classdef SimulatorUI < handle
 
             obj.gui_sep_(ctrl, 0.639);
 
-            % --- Listening toggles (user-gated playback) ---
-            uicontrol(ctrl, 'Style', 'text', 'String', 'Listen (optional)', ...
+            % --- Processing toggles (pipeline stages) ---
+            uicontrol(ctrl, 'Style', 'text', 'String', 'Processing', ...
                 'FontSize', 9, 'FontWeight', 'bold', ...
                 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.85 0.85 0.85], ...
                 'Units', 'normalized', 'Position', [0.05 0.600 0.90 0.028]);
 
-            obj.H.btn_play_vad = uicontrol(ctrl, 'Style', 'togglebutton', ...
-                'Value', double(obj.play_vad_on), ...
-                'String', 'Play VAD Speech: OFF', ...
+            obj.H.btn_vad_enable = uicontrol(ctrl, 'Style', 'togglebutton', ...
+                'Value', double(obj.vad_on), ...
+                'String', 'Enable VAD: OFF', ...
                 'FontSize', 9, ...
                 'BackgroundColor', [0.22 0.22 0.22], ...
                 'ForegroundColor', [0.60 0.60 0.60], ...
                 'Units', 'normalized', 'Position', [0.05 0.547 0.90 0.045], ...
-                'Callback', @(src,~) obj.cb_play_vad_(src));
+                'Callback', @(src,~) obj.cb_vad_enable_(src));
 
-            obj.H.btn_play_mwf = uicontrol(ctrl, 'Style', 'togglebutton', ...
-                'Value', double(obj.play_mwf_on), ...
-                'String', 'Play MWF: OFF', ...
+            obj.H.btn_mwf_enable = uicontrol(ctrl, 'Style', 'togglebutton', ...
+                'Value', double(obj.mwf_on), ...
+                'String', 'Enable MWF: OFF', ...
                 'FontSize', 9, ...
                 'BackgroundColor', [0.22 0.22 0.22], ...
                 'ForegroundColor', [0.60 0.60 0.60], ...
                 'Units', 'normalized', 'Position', [0.05 0.495 0.90 0.045], ...
-                'Callback', @(src,~) obj.cb_play_mwf_(src));
+                'Callback', @(src,~) obj.cb_mwf_enable_(src));
 
             obj.gui_sep_(ctrl, 0.483);
 
@@ -333,15 +333,29 @@ classdef SimulatorUI < handle
                 xlim(obj.H.ax_wav(m), [1 N]);
                 ylabel(obj.H.ax_wav(m), mic_label_(per_channel, m), ...
                        'Color', mc{idx}, 'FontSize', 9);
+                if m == 1
+                    % Green-tint background patch lights up while the VAD
+                    % is detecting speech (refresh_display_ toggles its
+                    % FaceAlpha each tick). Created BEFORE the line plot
+                    % so the waveform draws on top.
+                    obj.H.h_mic1_speech = patch(obj.H.ax_wav(m), ...
+                        'XData', [1 N N 1], ...
+                        'YData', [-1.05 -1.05 1.05 1.05], ...
+                        'FaceColor', [0.30 0.80 0.40], ...
+                        'FaceAlpha', 0.0, ...
+                        'EdgeColor', 'none', ...
+                        'HitTest', 'off');
+                end
                 obj.H.hlines(m) = plot(obj.H.ax_wav(m), 1:N, zeros(N, 1), ...
                     'Color', mc{idx}, 'LineWidth', 0.75);
                 if m == 1
                     if per_channel
                         ttl = ['Per-Mic Sources  (Mic 1 = Speech + Drone + Env  ·  ' ...
-                               'Mic 2 = Drone  ·  Mic 3 = Env  ·  Mic 1 feeds VAD)'];
+                               'Mic 2 = Drone  ·  Mic 3 = Env  ·  green tint = VAD speech)'];
                     else
                         ttl = sprintf(['Physical %d-Mic Array  (every mic receives ' ...
-                                       'speech+drone+env with TDOA + 1/d gain)'], cfg.n_mics);
+                                       'speech+drone+env with TDOA + 1/d gain ·  ' ...
+                                       'green tint on Mic 1 = VAD speech)'], cfg.n_mics);
                     end
                     title(obj.H.ax_wav(m), ttl, ...
                         'Color', 'w', 'FontSize', 9, 'FontWeight', 'bold');
@@ -434,27 +448,21 @@ classdef SimulatorUI < handle
 
             mic = obj.mixer.mix(speech, drone, envn);
 
-            % --- Composite feed for the VAD (sum / mean of all mics) ---
+            % --- Composite feed for the VAD (mic-1 in perChannel mode) ---
             comp = obj.mixer.composite(mic);
 
-            % --- VAD on the composite (three-source mix in perChannel mode) ---
-            [is_speech, ~] = obj.vad.step(comp);
+            % --- VAD stage (only when enabled) ---
+            if obj.vad_on
+                [is_speech, ~] = obj.vad.step(comp);
+            else
+                is_speech = false;
+            end
 
-            % --- MWF (pass-through stub) ---
-            y_enh = obj.mwf.step(mic, is_speech);
-
-            % --- User-gated playback (no automatic noisy output) ---
-            if cfg.playback.enabled
-                out = zeros(N, 1);
-                if obj.play_vad_on && is_speech
-                    out = out + comp;
-                end
-                if obj.play_mwf_on
-                    out = out + y_enh;
-                end
-                if obj.play_vad_on || obj.play_mwf_on
-                    obj.audio.play(out);
-                end
+            % --- MWF stage (only when enabled; requires VAD per cascade rule) ---
+            if obj.mwf_on
+                y_enh = obj.mwf.step(mic, is_speech);
+            else
+                y_enh = zeros(N, 1);
             end
 
             % --- Recording (independent of VAD / MWF) ---
@@ -470,7 +478,7 @@ classdef SimulatorUI < handle
             end
 
             obj.update_buffers_(comp, y_enh);
-            obj.refresh_display_(mic, y_enh);
+            obj.refresh_display_(mic, y_enh, is_speech);
         end
 
         function update_buffers_(obj, comp, y_enh)
@@ -488,7 +496,7 @@ classdef SimulatorUI < handle
             obj.vad_flags = flags(:).';
         end
 
-        function refresh_display_(obj, mic, y_enh)
+        function refresh_display_(obj, mic, y_enh, is_speech)
             if ~isvalid(obj.fig), return; end
             cfg = obj.Cfg;
             for m = 1:cfg.n_mics
@@ -504,6 +512,14 @@ classdef SimulatorUI < handle
                 set(obj.H.hline_mwf, 'YData', y_enh / pke);
             else
                 set(obj.H.hline_mwf, 'YData', zeros(numel(y_enh), 1));
+            end
+
+            % Green tint behind the mic-1 waveform whenever VAD is
+            % enabled and the current frame was flagged as speech.
+            if obj.vad_on && is_speech
+                set(obj.H.h_mic1_speech, 'FaceAlpha', 0.18);
+            else
+                set(obj.H.h_mic1_speech, 'FaceAlpha', 0.0);
             end
 
             set(obj.H.himg_noisy, 'CData', 20*log10(obj.spec_buf_noisy + 1e-12));
@@ -607,29 +623,65 @@ classdef SimulatorUI < handle
             end
         end
 
-        function cb_play_vad_(obj, src)
-            obj.play_vad_on = logical(src.Value);
-            if obj.play_vad_on
-                src.String = 'Play VAD Speech: ON';
-                src.BackgroundColor = [0.15 0.60 0.30];
-                src.ForegroundColor = 'w';
-            else
-                src.String = 'Play VAD Speech: OFF';
-                src.BackgroundColor = [0.22 0.22 0.22];
-                src.ForegroundColor = [0.60 0.60 0.60];
+        function cb_vad_enable_(obj, src)
+        %CB_VAD_ENABLE_  Toggle the VAD stage. If MWF is currently on and
+        %   the user disables VAD, MWF is auto-disabled too — MWF cannot
+        %   produce a meaningful output without VAD-driven covariance
+        %   updates.
+            on = logical(src.Value);
+            obj.vad_on = on;
+            obj.set_button_state_(src, on, 'Enable VAD', [0.15 0.60 0.30]);
+            if ~on && obj.mwf_on
+                obj.mwf_on = false;
+                obj.set_button_state_(obj.H.btn_mwf_enable, false, ...
+                    'Enable MWF', [0.15 0.45 0.70]);
+                obj.set_status_warning_( ...
+                    'VAD off — MWF auto-disabled (MWF needs VAD).');
+                fprintf(['[Q-WiSE] VAD disabled while MWF was on; ' ...
+                         'MWF auto-disabled (MWF needs VAD).\n']);
             end
         end
 
-        function cb_play_mwf_(obj, src)
-            obj.play_mwf_on = logical(src.Value);
-            if obj.play_mwf_on
-                src.String = 'Play MWF: ON';
-                src.BackgroundColor = [0.15 0.45 0.70];
-                src.ForegroundColor = 'w';
+        function cb_mwf_enable_(obj, src)
+        %CB_MWF_ENABLE_  Toggle the MWF stage. If VAD is off when the
+        %   user enables MWF, VAD is auto-enabled — MWF cannot produce a
+        %   meaningful output without VAD-driven covariance updates.
+            on = logical(src.Value);
+            if on && ~obj.vad_on
+                obj.vad_on = true;
+                obj.set_button_state_(obj.H.btn_vad_enable, true, ...
+                    'Enable VAD', [0.15 0.60 0.30]);
+                obj.set_status_warning_( ...
+                    'MWF needs VAD — VAD auto-enabled.');
+                fprintf(['[Q-WiSE] MWF enabled without VAD; ' ...
+                         'VAD auto-enabled (MWF needs VAD).\n']);
+            end
+            obj.mwf_on = on;
+            obj.set_button_state_(src, on, 'Enable MWF', [0.15 0.45 0.70]);
+        end
+
+        function set_button_state_(~, btn, on, base_label, on_color)
+        %SET_BUTTON_STATE_  Apply consistent ON/OFF visual state to a
+        %   togglebutton, including the base_label suffix and colour scheme.
+            btn.Value = double(on);
+            if on
+                btn.String          = [base_label ': ON'];
+                btn.BackgroundColor = on_color;
+                btn.ForegroundColor = 'w';
             else
-                src.String = 'Play MWF: OFF';
-                src.BackgroundColor = [0.22 0.22 0.22];
-                src.ForegroundColor = [0.60 0.60 0.60];
+                btn.String          = [base_label ': OFF'];
+                btn.BackgroundColor = [0.22 0.22 0.22];
+                btn.ForegroundColor = [0.60 0.60 0.60];
+            end
+        end
+
+        function set_status_warning_(obj, msg)
+        %SET_STATUS_WARNING_  Surface a one-line warning in the status
+        %   label using a warm tint. Persists until the next status
+        %   update (e.g. start/stop capture).
+            if isfield(obj.H, 'lbl_status') && isvalid(obj.H.lbl_status)
+                obj.H.lbl_status.String          = msg;
+                obj.H.lbl_status.ForegroundColor = [0.95 0.65 0.20];
             end
         end
 

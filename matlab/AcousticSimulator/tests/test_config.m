@@ -16,7 +16,7 @@ function test_required_fields_present(tc)
                   'distance_ref', ...
                   'speech_gain_init','drone_gain_init','env_gain_init', ...
                   'drone_wav_path','env_wav_path','mixer','vad','mwf', ...
-                  'playback','record','ui'};
+                  'record','ui'};
     for k = 1:numel(fields_top)
         verifyTrue(tc, isfield(cfg, fields_top{k}), ...
             sprintf('Missing cfg field: %s', fields_top{k}));
@@ -37,11 +37,6 @@ function test_required_fields_present(tc)
     for k = 1:numel(mixer_req)
         verifyTrue(tc, isfield(cfg.mixer, mixer_req{k}), ...
             sprintf('Missing cfg.mixer field: %s', mixer_req{k}));
-    end
-    pb_req = {'enabled','vad_default','mwf_default'};
-    for k = 1:numel(pb_req)
-        verifyTrue(tc, isfield(cfg.playback, pb_req{k}), ...
-            sprintf('Missing cfg.playback field: %s', pb_req{k}));
     end
     rec_req = {'dir','prefix','source'};
     for k = 1:numel(rec_req)
