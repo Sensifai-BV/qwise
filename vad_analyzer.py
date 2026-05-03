@@ -33,6 +33,8 @@ Usage:
         [--close_th        0.250] \
         [--len_th          0.250] \
         [--energy_th_db   -40]
+        [--save_vad_result]
+        [--save_vad_result_as_matrix]
 """
 
 import argparse
@@ -49,6 +51,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.ticker as mticker
 import numpy as np
+import soundfile as sf
 import torch
 from hyperpyyaml import load_hyperpyyaml
 
@@ -76,7 +79,7 @@ SINCQDR_MEDIAN_K    = 7
 TRVAD_SR = 16000
 
 RE_CLEAN = re.compile(r"^(sp\d+)\.wav$",               re.IGNORECASE)
-RE_NOISY = re.compile(r"^(sp\d+)_(.+?)_sn(\d+)\.wav$", re.IGNORECASE)
+RE_NOISY = re.compile(r"^(sp\d+)_(.+)_(mic\d+)\.wav$", re.IGNORECASE)
 
 # Colours
 C_CLEAN      = "#1565C0"
@@ -93,7 +96,8 @@ C_BG         = "#F5F5F5"
 # ────────────────────────────────────────────────────────────────────────────
 def discover_dataset(input_dir: Path) -> Dict[str, Dict]:
     raw: Dict = defaultdict(lambda: {"clean": None, "noisy": defaultdict(dict)})
-    for f in sorted(input_dir.iterdir()):
+    # Search recursively so speaker files inside subdirectories are found
+    for f in sorted(input_dir.rglob("*.wav")):
         if not f.is_file():
             continue
         m = RE_CLEAN.match(f.name)
@@ -102,7 +106,7 @@ def discover_dataset(input_dir: Path) -> Dict[str, Dict]:
             continue
         m = RE_NOISY.match(f.name)
         if m:
-            spk, noise, snr = m.group(1).lower(), m.group(2).lower(), int(m.group(3))
+            spk, noise, snr = m.group(1).lower(), m.group(2).lower(), m.group(3)
             raw[spk]["noisy"][noise][snr] = f
     valid = {}
     for spk, data in sorted(raw.items()):
@@ -110,7 +114,6 @@ def discover_dataset(input_dir: Path) -> Dict[str, Dict]:
             continue
         valid[spk] = {"clean": data["clean"], "noisy": dict(data["noisy"])}
     return valid
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Ground-truth VAD from clean audio energy
@@ -807,6 +810,56 @@ def load_mono_np(path: Path):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# VAD result saving helpers
+# ────────────────────────────────────────────────────────────────────────────
+def save_vad_result_audio(noisy_path: Path, boundaries: torch.Tensor,
+                          vad_name: str, output_dir: Path) -> Path:
+    """Extract and concatenate only the speech segments detected by VAD.
+
+    Output: {original_file_name}_{vad_name}.wav
+    Only speech regions are kept; leading/trailing silence and noise gaps
+    between segments are removed so the result contains no empty padding.
+    """
+    wav, sr = load_mono_np(noisy_path)
+    n = len(wav)
+    chunks = []
+    for i in range(boundaries.shape[0]):
+        s = max(0, int(boundaries[i, 0].item() * sr))
+        e = min(n, int(boundaries[i, 1].item() * sr))
+        if e > s:
+            chunks.append(wav[s:e])
+
+    if chunks:
+        speech_wav = np.concatenate(chunks)
+    else:
+        speech_wav = np.zeros(0, dtype=wav.dtype)
+
+    stem = noisy_path.stem
+    vad_tag = vad_name.lower().replace(" ", "_").replace("-", "")
+    out_path = output_dir / f"{stem}_{vad_tag}.wav"
+    sf.write(str(out_path), speech_wav, sr)
+    return out_path
+
+
+def save_vad_result_matrix(noisy_path: Path, boundaries: torch.Tensor,
+                           dur: float, vad_name: str, output_dir: Path,
+                           frame_dur: float = 0.01) -> Path:
+    """Save VAD binary frame labels as a numpy .npy file.
+
+    Output: {original_file_name}_{vad_name}.npy
+    Each element is a boolean (True=speech, False=noise) per frame of frame_dur seconds.
+    """
+    n_frames = max(1, round(dur / frame_dur))
+    labels = boundaries_to_frame_labels(boundaries, n_frames, frame_dur)
+
+    stem = noisy_path.stem
+    vad_tag = vad_name.lower().replace(" ", "_").replace("-", "")
+    out_path = output_dir / f"{stem}_{vad_tag}.npy"
+    np.save(str(out_path), labels)
+    return out_path
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Segment annotation helper
 # ────────────────────────────────────────────────────────────────────────────
 def _annotate_segments(ax, boundaries, total_dur):
@@ -1168,6 +1221,10 @@ def parse_args():
     p.add_argument("--len_th",          type=float, default=0.25)
     p.add_argument("--energy_th_db",    type=float, default=-55.0,
                    help="Min energy threshold floor (dB) for GT VAD on clean audio")
+    p.add_argument("--save_vad_result", action="store_true",
+                   help="Save VAD-masked audio as {original_file_name}_{vad_name}.wav in output_dir")
+    p.add_argument("--save_vad_result_as_matrix", action="store_true",
+                   help="Save VAD binary frame labels as {original_file_name}_{vad_name}.npy in output_dir")
     return p.parse_args()
 
 
@@ -1409,6 +1466,25 @@ def main():
                                     gt_b, audio_dur, model_results, output_dir)
                     except Exception as e:
                         logger.warning(f"  Plot failed: {e}")
+
+                    # Save VAD result audio / matrix if requested
+                    for mres in model_results:
+                        if args.save_vad_result:
+                            try:
+                                out_wav = save_vad_result_audio(
+                                    noisy_path, mres["boundaries"],
+                                    mres["name"], output_dir)
+                                logger.info(f"    Saved VAD audio: {out_wav.name}")
+                            except Exception as e:
+                                logger.warning(f"    Save VAD audio failed ({mres['name']}): {e}")
+                        if args.save_vad_result_as_matrix:
+                            try:
+                                out_npy = save_vad_result_matrix(
+                                    noisy_path, mres["boundaries"],
+                                    mres["dur"], mres["name"], output_dir)
+                                logger.info(f"    Saved VAD matrix: {out_npy.name}")
+                            except Exception as e:
+                                logger.warning(f"    Save VAD matrix failed ({mres['name']}): {e}")
 
                 n_processed += 1
 

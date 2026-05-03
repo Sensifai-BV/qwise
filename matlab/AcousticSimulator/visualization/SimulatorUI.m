@@ -465,16 +465,9 @@ classdef SimulatorUI < handle
                 y_enh = zeros(N, 1);
             end
 
-            % --- Recording (independent of VAD / MWF) ---
+            % --- Recording (driven by the Processing toggles) ---
             if obj.recording
-                switch lower(cfg.record.source)
-                    case 'raw_mic'
-                        obj.audio.rec_write(speech);
-                    case 'speech'
-                        obj.audio.rec_write(mic(:, 1));
-                    otherwise   % 'composite' (default)
-                        obj.audio.rec_write(comp);
-                end
+                obj.write_recording_(comp, y_enh, is_speech);
             end
 
             obj.update_buffers_(comp, y_enh);
@@ -553,6 +546,34 @@ classdef SimulatorUI < handle
                 Ys(:, i) = [0; 0; 1; 1];
             end
             set(obj.H.h_vad_shade, 'XData', Xs, 'YData', Ys);
+        end
+
+        function write_recording_(obj, comp, y_enh, is_speech)
+        %WRITE_RECORDING_  Apply the Processing-toggle-driven recording
+        %   policy. Called once per real-time tick while obj.recording
+        %   is true.
+        %
+        %     vad_on=F, mwf_on=F → write `comp` (continuous noisy mix)
+        %     vad_on=T, mwf_on=F → write `comp` only when is_speech
+        %     vad_on=T, mwf_on=T → write `y_enh` only when is_speech
+        %
+        %   In both VAD-on cases, non-speech ticks are skipped — the
+        %   resulting WAV contains only the detected speech segments,
+        %   concatenated with no silence gaps. The (vad_on=F, mwf_on=T)
+        %   combination is impossible because the toggle cascade
+        %   auto-enables VAD whenever MWF is turned on.
+            if obj.vad_on
+                if ~is_speech
+                    return;   % skip-on-non-speech: speech-only WAV
+                end
+                if obj.mwf_on
+                    obj.audio.rec_write(y_enh);
+                else
+                    obj.audio.rec_write(comp);
+                end
+            else
+                obj.audio.rec_write(comp);
+            end
         end
     end
 

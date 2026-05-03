@@ -38,7 +38,7 @@ function test_required_fields_present(tc)
         verifyTrue(tc, isfield(cfg.mixer, mixer_req{k}), ...
             sprintf('Missing cfg.mixer field: %s', mixer_req{k}));
     end
-    rec_req = {'dir','prefix','source'};
+    rec_req = {'dir','prefix'};
     for k = 1:numel(rec_req)
         verifyTrue(tc, isfield(cfg.record, rec_req{k}), ...
             sprintf('Missing cfg.record field: %s', rec_req{k}));

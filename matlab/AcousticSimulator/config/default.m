@@ -71,12 +71,13 @@ function cfg = default()
     cfg.mwf.passthrough       = true;        % <-- current stub behaviour
 
     % ---------------- Recording --------------------------------------
+    %   What gets written is decided at runtime by the Processing toggles:
+    %     vad_on=F, mwf_on=F → noisy mix (continuous)
+    %     vad_on=T, mwf_on=F → noisy mix gated by VAD (speech-only)
+    %     vad_on=T, mwf_on=T → MWF-cleaned speech, gated by VAD
+    %   See SimulatorUI.write_recording_ for the implementation.
     cfg.record.dir            = 'recordings';
     cfg.record.prefix         = 'qwise';
-    % 'composite' : sum of all mic channels (input + drone + env)
-    % 'raw_mic'   : only the live input microphone signal
-    % 'speech'    : the speech channel (mic-1 post-gain)
-    cfg.record.source         = 'composite';
 
     % ---------------- Visualization ----------------------------------
     cfg.ui.spec_ncols         = 90;
