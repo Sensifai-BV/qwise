@@ -60,15 +60,36 @@ function cfg = default()
     cfg.vad.smoothing         = 0.30;        % score EMA
 
     % ---------------- MWF --------------------------------------------
+    %   Beamformer method   : 'gev'  — Generalized-Eigenvalue / Max-SNR
+    %                                   (recommended for non-stationary
+    %                                   drone-rotor noise — matches Q-WiSE
+    %                                   reference Python pipeline)
+    %                         'mwf'  — Speech-Distortion-Weighted MWF
+    %                         'mvdr' — MVDR with eigenvector steering
+    %   Postfilter          : single-channel Wiener post-filter after
+    %                                   beamforming (decision-directed,
+    %                                   frequency-smoothed)
+    %   Mask params (batch) : threshold + context frames driving the
+    %                                   speech mask built from VAD audio
     cfg.mwf.enabled           = true;
-    cfg.mwf.stft_win          = 512;
-    cfg.mwf.stft_hop          = 256;
+    cfg.mwf.method            = 'gev';       % 'gev' | 'mwf' | 'mvdr'
+    cfg.mwf.n_fft             = 1024;        % batch-mode STFT size  (matches Python)
+    cfg.mwf.hop               = 256;         % batch-mode STFT hop   (matches Python)
+    cfg.mwf.stft_win          = 512;         % streaming STFT window
+    cfg.mwf.stft_hop          = 256;         % streaming STFT hop
     cfg.mwf.ref_mic           = 1;
     cfg.mwf.mu                = 1.0;         % SDW speech-distortion weight
-    cfg.mwf.eps_reg           = 1e-4;        % diagonal loading
-    cfg.mwf.alpha_nn          = 0.92;        % Rnn EMA (noise-only frames)
-    cfg.mwf.alpha_ss          = 0.88;        % Rss EMA (speech frames)
-    cfg.mwf.passthrough       = true;        % <-- current stub behaviour
+    cfg.mwf.eps_reg           = 1e-10;       % core regularization (matches Python)
+    cfg.mwf.diag_load_ratio   = 1e-4;        % trace-proportional diagonal loading
+    cfg.mwf.alpha_nn          = 0.92;        % Rnn EMA (streaming, noise-only frames)
+    cfg.mwf.alpha_ss          = 0.88;        % Rss EMA (streaming, speech frames)
+    cfg.mwf.postfilter        = true;        % apply Wiener post-filter
+    cfg.mwf.gain_floor        = 0.08;        % post-filter floor (anti musical noise)
+    cfg.mwf.noise_floor_alpha = 0.98;        % post-filter noise tracker EMA
+    cfg.mwf.pf_smooth_kernel  = 3;           % freq smoothing kernel size
+    cfg.mwf.mask_threshold    = 0.01;        % batch speech-mask RMS threshold
+    cfg.mwf.mask_context      = 3;           % batch speech-mask context frames
+    cfg.mwf.passthrough       = true;        % bypass MWF, return reference mic
 
     % ---------------- Recording --------------------------------------
     %   What gets written is decided at runtime by the Processing toggles:

@@ -1,5 +1,5 @@
 function tests = test_mwf_passthrough()
-%TEST_MWF_PASSTHROUGH  Sanity tests for the MWF pass-through scaffolding.
+%TEST_MWF_PASSTHROUGH  Sanity tests for the MWF streaming pass-through path.
     tests = functiontests(localfunctions);
 end
 
@@ -26,14 +26,12 @@ function test_covariance_buffers_initialised(tc)
     m   = mwf(cfg);
     verifyEqual(tc, size(m.Rnn), [m.nbin cfg.n_mics cfg.n_mics]);
     verifyEqual(tc, size(m.Rss), [m.nbin cfg.n_mics cfg.n_mics]);
-    % Rnn initialised to eps_reg * I per bin.
     R0 = squeeze(m.Rnn(1, :, :));
     verifyEqual(tc, R0, cfg.mwf.eps_reg * eye(cfg.n_mics), 'AbsTol', 1e-12);
 end
 
 function test_gain_map_placeholder_is_ones(tc)
     cfg = tc.TestData.cfg;
-    addpath(fullfile(fileparts(fileparts(mfilename('fullpath'))), 'mwf'));
     X = randn(cfg.mwf.stft_win/2 + 1, cfg.n_mics);
     G = get_tf_gain_map(X, cfg);
     verifyEqual(tc, size(G), [size(X, 1) 1]);
@@ -49,4 +47,11 @@ function test_reset_restores_initial_covariances(tc)
     m.reset();
     R0 = squeeze(m.Rnn(1, :, :));
     verifyEqual(tc, R0, cfg.mwf.eps_reg * eye(cfg.n_mics), 'AbsTol', 1e-12);
+end
+
+function test_invalid_method_rejected(tc)
+    cfg = tc.TestData.cfg;
+    cfg.mwf.method = 'not-a-method';
+    f = @() mwf(cfg);
+    verifyError(tc, f, 'mwf:bad_method');
 end
