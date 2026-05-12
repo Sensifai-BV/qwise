@@ -100,7 +100,7 @@ function cfg = default()
     cfg.mwf.pf_smooth_kernel  = 3;           % freq smoothing kernel size
     cfg.mwf.mask_threshold    = 0.01;        % batch speech-mask RMS threshold
     cfg.mwf.mask_context      = 3;           % batch speech-mask context frames
-    cfg.mwf.passthrough       = true;        % bypass MWF, return reference mic
+    cfg.mwf.passthrough       = false;       % set true to bypass MWF (debug only)
 
     % ---------------- Recording --------------------------------------
     %   Mode is locked in at the moment the Record button is pressed:

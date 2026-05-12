@@ -42,7 +42,8 @@ classdef SimulatorUI < handle
         vad_on          = false   % run VAD stage in the pipeline
         mwf_on          = false   % run MWF stage in the pipeline (requires VAD)
         recording       = false   % is a WAV capture in progress
-        rec_kind_       = ''      % '' | 'mwf' | 'vad' | 'multi'
+        rec_kind_       = ''      % short label of the active recording session
+        rec_tracks_     = struct('mic', false, 'vad', false, 'mwf', false)
     end
 
     properties (Access = private)
@@ -551,26 +552,28 @@ classdef SimulatorUI < handle
 
         function write_recording_(obj, mic, comp, y_enh, is_speech)
         %WRITE_RECORDING_  Route the current tick into the active
-        %   recording session. The recording KIND was decided at the
-        %   moment Record was pressed and is held in obj.rec_kind_:
+        %   recording session. Which tracks exist was decided at
+        %   Record-press time and lives in obj.rec_tracks_:
         %
-        %     'mwf'   → mono MWF output, gated by VAD (speech only)
-        %     'vad'   → mono composite (ref mic), gated by VAD
-        %     'multi' → multichannel raw mic block (continuous)
+        %     mic = micNN.wav (continuous, N raw mic channels)
+        %     vad = vad.wav   (composite, non-speech frames zeroed —
+        %                      VAD-detected speech preserved in place)
+        %     mwf = mwf.wav   (MWF output, continuous when MWF is active)
         %
-        %   Toggling VAD/MWF mid-recording does NOT change the kind —
-        %   the user has to stop and re-start to switch.
-            switch obj.rec_kind_
-                case 'mwf'
-                    if is_speech
-                        obj.audio.rec_write(y_enh);
-                    end
-                case 'vad'
-                    if is_speech
-                        obj.audio.rec_write(comp);
-                    end
-                case 'multi'
-                    obj.audio.rec_write(mic);
+        %   Tracks are mixed-and-matched: if MWF was off at Record-press,
+        %   the 'mwf' track simply does not exist.
+            if obj.rec_tracks_.mic
+                obj.audio.rec_session_write('mic', mic);
+            end
+            if obj.rec_tracks_.vad
+                v = comp;
+                if ~is_speech
+                    v(:) = 0;
+                end
+                obj.audio.rec_session_write('vad', v);
+            end
+            if obj.rec_tracks_.mwf
+                obj.audio.rec_session_write('mwf', y_enh);
             end
         end
     end
@@ -705,40 +708,44 @@ classdef SimulatorUI < handle
         end
 
         function cb_record_(obj, src)
-        %CB_RECORD_  Start/stop a recording session. The kind is decided
-        %   here, ONCE, from the current VAD/MWF toggles:
+        %CB_RECORD_  Start/stop a multi-track recording session. The set
+        %   of tracks is decided here, ONCE, from the current toggles:
         %
-        %     VAD+MWF on    → 'mwf'   (mono, speech-only, MWF output)
-        %     VAD on only   → 'vad'   (mono, speech-only, composite/ref)
-        %     both off      → 'multi' (N WAVs, one per mic, continuous)
+        %     VAD on + MWF on  → mic + vad + mwf
+        %     VAD on (no MWF)  → mic + vad
+        %     both off         → mic only
         %
-        %   Once started, toggling VAD/MWF does not change the kind.
+        %   Every recording produces a timestamped folder under
+        %   cfg.record.dir with one WAV per active track (mic uses N
+        %   files: mic01.wav, mic02.wav, ...). Toggling VAD/MWF mid-
+        %   recording does NOT change the track set — stop and re-start
+        %   to reconfigure.
             want_on = logical(src.Value);
             if want_on && ~obj.recording
-                if obj.vad_on
-                    rec_kind = obj.choose_vad_kind_();
-                    audio_mode = 'mono';
-                else
-                    rec_kind   = 'multi';
-                    audio_mode = 'multi';
-                end
-                path = obj.audio.rec_start(audio_mode);
+                tracks = struct( ...
+                    'mic', true, ...
+                    'vad', obj.vad_on, ...
+                    'mwf', obj.vad_on && obj.mwf_on);
+                path = obj.audio.rec_start_session();
                 if isempty(path)
                     set(src, 'Value', 0);
-                    warndlg('Could not open recording file.', 'Q-WiSE');
+                    warndlg('Could not open recording session.', 'Q-WiSE');
                     return;
                 end
-                obj.rec_kind_ = rec_kind;
-                obj.recording = true;
-                src.String = sprintf('Record: ● REC (%s)', rec_kind);
+                obj.rec_tracks_ = tracks;
+                obj.rec_kind_   = obj.tracks_label_(tracks);
+                obj.recording   = true;
+                src.String          = sprintf('Record: ● REC (%s)', obj.rec_kind_);
                 src.BackgroundColor = [0.78 0.10 0.10];
                 src.ForegroundColor = 'w';
-                fprintf('[Q-WiSE] Record kind: %s -> %s\n', rec_kind, path);
+                fprintf('[Q-WiSE] Recording tracks: %s -> %s\n', ...
+                        obj.rec_kind_, path);
             elseif ~want_on && obj.recording
-                path = obj.audio.rec_stop();
-                obj.recording = false;
-                obj.rec_kind_ = '';
-                src.String = 'Record: OFF';
+                path = obj.audio.rec_stop_session();
+                obj.recording   = false;
+                obj.rec_kind_   = '';
+                obj.rec_tracks_ = struct('mic', false, 'vad', false, 'mwf', false);
+                src.String          = 'Record: OFF';
                 src.BackgroundColor = [0.22 0.22 0.22];
                 src.ForegroundColor = [0.60 0.60 0.60];
                 if ~isempty(path)
@@ -747,14 +754,14 @@ classdef SimulatorUI < handle
             end
         end
 
-        function k = choose_vad_kind_(obj)
-        %CHOOSE_VAD_KIND_  When VAD is on at record-start time, choose
-        %   between MWF-clean ('mwf') and VAD-gated composite ('vad').
-            if obj.mwf_on
-                k = 'mwf';
-            else
-                k = 'vad';
-            end
+        function s = tracks_label_(~, tracks)
+        %TRACKS_LABEL_  Short status string of the active track set.
+            on = {};
+            if tracks.mic, on{end+1} = 'mic'; end
+            if tracks.vad, on{end+1} = 'vad'; end
+            if tracks.mwf, on{end+1} = 'mwf'; end
+            s = strjoin(on, '+');
+            if isempty(s), s = 'none'; end
         end
 
         function safe_release_(obj)

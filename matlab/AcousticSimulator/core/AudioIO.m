@@ -38,13 +38,14 @@ classdef AudioIO < handle
         drone_ptr = 1
         env_ptr   = 1
         rec_active_ = false
-        rec_mode_   = ''            % '' | 'mono' | 'multi'
-        rec_path_   = ''            % file (mono) or folder (multi)
+        rec_mode_   = ''            % '' | 'mono' | 'multi' | 'session'
+        rec_path_   = ''            % file (mono) or folder (multi/session)
         rec_buf_    = zeros(0, 1)   % mono   accumulator
         rec_bufM_   = zeros(0, 0)   % multi  accumulator [samples × n_mics]
         rec_cap_    = 0
         rec_len_    = 0
         rec_n_ch_   = 1
+        sess_tracks_ = struct()     % name → struct(buf,len,cap,n_ch)
     end
 
     methods
@@ -163,14 +164,19 @@ classdef AudioIO < handle
 
         function dst = rec_stop(obj)
         %REC_STOP  Flush buffers to disk and close the session.
-        %   Returns the file path (mono) or the folder path (multi).
+        %   Returns the file path (mono) or the folder path (multi/session).
             dst = obj.rec_path_;
             if ~obj.rec_active_
                 dst = '';
                 return;
             end
-            obj.rec_active_ = false;
             mode = obj.rec_mode_;
+            if strcmpi(mode, 'session')
+                % Defer to the session-specific finalizer.
+                dst = obj.rec_stop_session();
+                return;
+            end
+            obj.rec_active_ = false;
 
             try
                 switch mode
@@ -219,6 +225,125 @@ classdef AudioIO < handle
             obj.rec_n_ch_ = 1;
             obj.rec_path_ = '';
             obj.rec_mode_ = '';
+        end
+
+        % ---------------- Session recording -----------------------
+        % A "session" is a recording folder that can hold an arbitrary
+        % set of named tracks. Tracks are buffered in memory and flushed
+        % to disk on rec_stop_session(). This is the mode the GUI uses
+        % when the user wants more than one output simultaneously
+        % (e.g. raw mics + VAD + MWF cleaned speech).
+
+        function dst = rec_start_session(obj, path)
+        %REC_START_SESSION  Open a recording session folder.
+            if obj.rec_active_
+                warning('QWiSE:AudioIO:AlreadyRecording', ...
+                        '[Q-WiSE] rec_start_session called while recording.');
+                dst = obj.rec_path_;
+                return;
+            end
+            if nargin < 2 || isempty(path)
+                path = obj.default_rec_path_('dir');
+            end
+            obj.ensure_dir_(path);
+            obj.rec_mode_    = 'session';
+            obj.rec_path_    = path;
+            obj.sess_tracks_ = struct();
+            obj.rec_active_  = true;
+            dst              = path;
+            fprintf('[Q-WiSE] Recording session started -> %s\n', path);
+        end
+
+        function rec_session_write(obj, name, x)
+        %REC_SESSION_WRITE  Append samples to a named track inside the
+        %   active session. `name` becomes the file stem.  `x` is either
+        %   a [N×1] mono block (→ <name>.wav) or a [N×K] multi-channel
+        %   block (→ <name>01.wav, <name>02.wav, ..., <name>KK.wav).
+            if ~obj.rec_active_ || ~strcmpi(obj.rec_mode_, 'session'), return; end
+            if isempty(x), return; end
+            if ~isvarname(name)
+                warning('QWiSE:AudioIO:BadTrackName', ...
+                    '[Q-WiSE] track name "%s" is not a valid identifier.', name);
+                return;
+            end
+            n_ch = size(x, 2);
+            nx   = size(x, 1);
+
+            if ~isfield(obj.sess_tracks_, name)
+                cap0 = 30 * obj.cfg.fs;
+                obj.sess_tracks_.(name) = struct( ...
+                    'buf',  zeros(cap0, n_ch), ...
+                    'len',  0, ...
+                    'cap',  cap0, ...
+                    'n_ch', n_ch);
+            end
+
+            t = obj.sess_tracks_.(name);
+            if n_ch ~= t.n_ch
+                warning('QWiSE:AudioIO:TrackChannelMismatch', ...
+                    '[Q-WiSE] track %s got %d channels, expected %d.', ...
+                    name, n_ch, t.n_ch);
+                return;
+            end
+
+            need = t.len + nx;
+            if need > t.cap
+                new_cap = max(need, 2 * t.cap);
+                tmp = zeros(new_cap, t.n_ch);
+                tmp(1:t.len, :) = t.buf(1:t.len, :);
+                t.buf = tmp;
+                t.cap = new_cap;
+            end
+            t.buf(t.len+1:t.len+nx, :) = max(min(x, 1), -1);
+            t.len = t.len + nx;
+            obj.sess_tracks_.(name) = t;
+        end
+
+        function dst = rec_stop_session(obj)
+        %REC_STOP_SESSION  Flush all session tracks to <session>/<name>.wav
+        %   (or <name>NN.wav for multi-channel tracks) and close.
+            dst = obj.rec_path_;
+            if ~obj.rec_active_ || ~strcmpi(obj.rec_mode_, 'session')
+                dst = '';
+                return;
+            end
+            obj.rec_active_ = false;
+            names = fieldnames(obj.sess_tracks_);
+            files = {};
+            try
+                for k = 1:numel(names)
+                    nm = names{k};
+                    t  = obj.sess_tracks_.(nm);
+                    Y  = t.buf(1:t.len, :);
+                    if isempty(Y), continue; end
+                    if t.n_ch == 1
+                        fn = fullfile(dst, [nm '.wav']);
+                        audiowrite(fn, Y, obj.cfg.fs, 'BitsPerSample', 16);
+                        files{end+1} = fn; %#ok<AGROW>
+                    else
+                        for m = 1:t.n_ch
+                            fn = fullfile(dst, sprintf('%s%02d.wav', nm, m));
+                            audiowrite(fn, Y(:, m), obj.cfg.fs, 'BitsPerSample', 16);
+                            files{end+1} = fn; %#ok<AGROW>
+                        end
+                    end
+                end
+                if isempty(files)
+                    fprintf(['[Q-WiSE] Session stopped with no samples — ' ...
+                             'nothing written.\n']);
+                    dst = '';
+                else
+                    fprintf('[Q-WiSE] Session stopped -> %s (%d files)\n', ...
+                            dst, numel(files));
+                end
+            catch ME
+                warning('QWiSE:AudioIO:SessionFlush', ...
+                    '[Q-WiSE] session flush failed: %s', ME.message);
+                dst = '';
+            end
+            obj.sess_tracks_ = struct();
+            obj.rec_path_    = '';
+            obj.rec_mode_    = '';
         end
 
         function tf = is_recording(obj)
