@@ -103,14 +103,17 @@ function test_per_source_gains_obey_inverse_distance(tc)
     geo = build_geometry(cfg);
     % Human at slant_dist (>d_ref) must attenuate overall.
     verifyLessThanOrEqual(tc, max(geo.gains_speech), 1 + 1e-9);
-    % Gain must exactly match the 1/d law clamped at d_ref.
+    % Gain must exactly match the 1/d law clamped at d_ref — this is the
+    % real correctness contract.
     expected = cfg.distance_ref ./ max(geo.dist_speech, cfg.distance_ref);
     verifyEqual(tc, geo.gains_speech, expected, 'AbsTol', 1e-12);
-    % Sanity: human at slant_dist (~2.5 m) → gain ~ d_ref/slant ~ 0.40.
-    g_expected = cfg.distance_ref / cfg.slant_dist;
-    verifyGreaterThan(tc, geo.gains_speech(cfg.mwf.ref_mic), g_expected*0.90);
-    verifyLessThan   (tc, geo.gains_speech(cfg.mwf.ref_mic), g_expected*1.10);
-    % Drone co-located with mics → gain clamps to 1.0.
+    % Ref-mic gain must agree with the 1/r law at the ref mic's actual
+    % distance from the speaker — NOT against 1/slant_dist, because for
+    % wider arrays the ref mic does not sit at slant_dist from the human.
+    ref      = cfg.mwf.ref_mic;
+    g_ref    = cfg.distance_ref / max(geo.dist_speech(ref), cfg.distance_ref);
+    verifyEqual(tc, geo.gains_speech(ref), g_ref, 'AbsTol', 1e-12);
+    % Drone co-located with mic centroid → at least one mic clamps to 1.0.
     verifyEqual(tc, max(geo.gains_drone), 1.0, 'AbsTol', 1e-9);
     % Env noise is far (8 m default) → gain < 0.5.
     verifyLessThan(tc, max(geo.gains_env), 0.5);

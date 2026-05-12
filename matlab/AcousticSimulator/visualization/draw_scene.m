@@ -1,15 +1,47 @@
 function draw_scene(ax, geo, cfg)
 %DRAW_SCENE  Render the static 3D acoustic scene into axes `ax`.
+%   Axis limits are computed from the union of all visible objects
+%   (human, drone, env, mics, image source) so the scene stays centred
+%   no matter how far the env source or drone move. Equal X/Y span
+%   keeps top-down distances readable.
     hold(ax, 'on'); grid(ax, 'on'); box(ax, 'on');
-    set(ax, 'DataAspectRatio', [1 1 1], 'PlotBoxAspectRatio', [1.3 1.1 1]);
-    set(ax, 'XLim', [-0.5 5.5], 'YLim', [-1.4 4.0], 'ZLim', [-1.6 3.8]);
 
-    % Asphalt ground
-    [gx, gy] = meshgrid(linspace(-0.4, 5.3, 8), linspace(-1.2, 3.8, 8));
+    % Collect every position that will be plotted so the bounds enclose
+    % them all with a uniform margin.
+    pts = [geo.pos_human;
+           geo.pos_drone;
+           geo.pos_env;
+           geo.pos_mics;
+           geo.pos_img_src];
+
+    margin = 0.6;
+    xr = [min(pts(:,1))-margin, max(pts(:,1))+margin];
+    yr = [min(pts(:,2))-margin, max(pts(:,2))+margin];
+    zr = [min(pts(:,3))-margin, max(pts(:,3))+margin];
+
+    % Force x/y to share the same half-span so the scene doesn't stretch
+    % asymmetrically when the env source sits far off-axis.
+    cx = mean(xr);  cy = mean(yr);
+    half_xy = max(diff(xr), diff(yr)) / 2;
+    half_xy = max(half_xy, 1.5);                % minimum so a tight scene
+                                                 % still feels readable.
+    xr = [cx - half_xy, cx + half_xy];
+    yr = [cy - half_xy, cy + half_xy];
+
+    % Z gets a tighter range, but always show the ground plane.
+    zr(1) = min(zr(1), -0.2);
+    zr(2) = max(zr(2),  0.5);
+
+    set(ax, 'DataAspectRatio', [1 1 1], 'PlotBoxAspectRatio', [1.1 1.1 0.9]);
+    set(ax, 'XLim', xr, 'YLim', yr, 'ZLim', zr);
+
+    % Asphalt ground spans the visible X/Y window.
+    [gx, gy] = meshgrid(linspace(xr(1), xr(2), 10), ...
+                        linspace(yr(1), yr(2), 10));
     surf(ax, gx, gy, zeros(size(gx)), ...
          'FaceColor', [0.27 0.27 0.27], 'FaceAlpha', 0.25, ...
          'EdgeColor', [0.42 0.42 0.42], 'EdgeAlpha', 0.12);
-    text(0.2, -1.0, 0.02, sprintf('Asphalt (R=%.2f)', cfg.ground_R), ...
+    text(xr(1)+0.3, yr(1)+0.3, 0.02, sprintf('Asphalt (R=%.2f)', cfg.ground_R), ...
          'FontSize', 7, 'Color', [0.48 0.48 0.48], 'Parent', ax);
 
     % Human body / mouth

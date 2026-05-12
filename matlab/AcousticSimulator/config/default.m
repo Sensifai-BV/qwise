@@ -13,8 +13,8 @@ function cfg = default()
     cfg.c               = 343;           % speed of sound [m/s]
 
     % ---------------- Microphone + virtual array ---------------------
-    cfg.n_mics          = 3;             % virtual array size (>=1)
-    cfg.mic_spacing     = 0.10;          % m
+    cfg.n_mics          = 5;             % virtual array size (>=1)
+    cfg.mic_spacing     = 0.20;          % m
     cfg.mic_geometry    = 'linear';      % 'linear' | 'circular'
                                          %   array is centred on the drone
 
