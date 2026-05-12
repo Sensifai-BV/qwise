@@ -32,11 +32,14 @@ classdef AudioIO < handle
         n_hw_ch = 1
         drone_wav
         env_wav
+        speech_wav = []         % optional clean-speech loop (empty = use mic)
+        speech_wav_path = ''
     end
 
     properties (Access = private)
         drone_ptr = 1
         env_ptr   = 1
+        speech_ptr_ = 1
         rec_active_ = false
         rec_mode_   = ''            % '' | 'mono' | 'multi' | 'session'
         rec_path_   = ''            % file (mono) or folder (multi/session)
@@ -80,6 +83,60 @@ classdef AudioIO < handle
         function c = next_env_chunk(obj, N)
             c = loop_chunk(obj.env_wav, obj.env_ptr, N);
             obj.env_ptr = mod(obj.env_ptr + N - 1, length(obj.env_wav)) + 1;
+        end
+
+        % ---------------- Clean-speech WAV source ------------------
+        % An optional looped clean-speech buffer. When set, the GUI can
+        % feed mixer/VAD/MWF from this loop instead of the live mic — the
+        % rest of the pipeline does not need to know where the speech
+        % came from.
+
+        function load_speech_wav(obj, path)
+        %LOAD_SPEECH_WAV  Load a clean-speech WAV, resample to cfg.fs,
+        %   mono, and cache it as a looped buffer.
+            [y, fs0] = audioread(path);
+            if size(y, 2) > 1
+                y = mean(y, 2);
+            end
+            if fs0 ~= obj.cfg.fs
+                y = resample(y, obj.cfg.fs, fs0);
+            end
+            % Peak-normalise to a sane level so the WAV behaves like the
+            % live mic (the rest of the pipeline expects |x| <= ~1).
+            pk = max(abs(y));
+            if pk > 0
+                y = y / pk * 0.9;
+            end
+            obj.speech_wav      = y(:);
+            obj.speech_wav_path = path;
+            obj.speech_ptr_     = 1;
+            fprintf('[Q-WiSE] Loaded clean-speech WAV: %s (%.2f s, %d Hz)\n', ...
+                    path, numel(y) / obj.cfg.fs, obj.cfg.fs);
+        end
+
+        function clear_speech_wav(obj)
+        %CLEAR_SPEECH_WAV  Drop the cached speech loop (revert to mic).
+            obj.speech_wav      = [];
+            obj.speech_wav_path = '';
+            obj.speech_ptr_     = 1;
+        end
+
+        function tf = has_speech_wav(obj)
+            tf = ~isempty(obj.speech_wav);
+        end
+
+        function c = next_speech_chunk(obj, N)
+        %NEXT_SPEECH_CHUNK  Next N samples of the clean-speech loop.
+        %   Returns zeros if no WAV is loaded (caller should check
+        %   has_speech_wav first; the silent fallback is just a safety
+        %   net so the timer cannot crash mid-recording).
+            if isempty(obj.speech_wav)
+                c = zeros(N, 1);
+                return;
+            end
+            c = loop_chunk(obj.speech_wav, obj.speech_ptr_, N);
+            obj.speech_ptr_ = mod(obj.speech_ptr_ + N - 1, ...
+                                  length(obj.speech_wav)) + 1;
         end
 
         % ---------------- Recording --------------------------------

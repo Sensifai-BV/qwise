@@ -142,6 +142,47 @@ classdef SourceMixer < handle
         function ref = ref_mic(obj)
             ref = obj.ref_mic_idx;
         end
+
+        function update_geometry(obj, new_geo)
+        %UPDATE_GEOMETRY  Swap in a new geometry struct at runtime.
+        %   Re-caches per-source fractional delays and 1/r gains and
+        %   resizes the per-source history rings, preserving the tail so
+        %   the next mix() call does not click on the boundary.
+        %
+        %   Used by the GUI scene sliders (human height, slant distance,
+        %   azimuths, etc.). The mic count must NOT change at runtime
+        %   because that would invalidate downstream buffer shapes.
+            if numel(new_geo.gains_speech) ~= obj.n_mics
+                error('SourceMixer:update_geometry:NMicChange', ...
+                      'Cannot change n_mics at runtime (have %d, got %d).', ...
+                      obj.n_mics, numel(new_geo.gains_speech));
+            end
+
+            obj.geo                 = new_geo;
+            obj.frac_delays_speech_ = obj.fetch_frac_delays_(new_geo, 'speech');
+            obj.frac_delays_drone_  = obj.fetch_frac_delays_(new_geo, 'drone');
+            obj.frac_delays_env_    = obj.fetch_frac_delays_(new_geo, 'env');
+            obj.gains_speech_       = new_geo.gains_speech(:);
+            obj.gains_drone_        = new_geo.gains_drone(:);
+            obj.gains_env_          = new_geo.gains_env(:);
+
+            tau_max     = max([max(obj.frac_delays_speech_), ...
+                               max(obj.frac_delays_drone_),  ...
+                               max(obj.frac_delays_env_),    0]);
+            new_hist_len = max(1, ceil(tau_max) + 1);
+
+            if new_hist_len > obj.hist_len
+                pad = new_hist_len - obj.hist_len;
+                obj.hist_speech = [zeros(pad, 1); obj.hist_speech];
+                obj.hist_drone  = [zeros(pad, 1); obj.hist_drone];
+                obj.hist_env    = [zeros(pad, 1); obj.hist_env];
+            elseif new_hist_len < obj.hist_len
+                obj.hist_speech = obj.hist_speech(end - new_hist_len + 1:end);
+                obj.hist_drone  = obj.hist_drone (end - new_hist_len + 1:end);
+                obj.hist_env    = obj.hist_env   (end - new_hist_len + 1:end);
+            end
+            obj.hist_len = new_hist_len;
+        end
     end
 
     methods (Access = private)
