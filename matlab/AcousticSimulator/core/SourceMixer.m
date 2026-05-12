@@ -1,49 +1,51 @@
 classdef SourceMixer < handle
-%SOURCEMIXER  Three-source mixer supporting per-channel or physical wiring.
+%SOURCEMIXER  Physical multi-source → N-microphone array simulator.
 %
-%   The Q-WiSE scene has three acoustic sources:
-%       1. Human speech    (live input-mic capture)
-%       2. Drone-fan noise (wav loop)
-%       3. Environment     (wav loop)
+%   Single physical mixing model (mixer_1.m-style): every microphone
+%   receives every source. Per-source per-mic propagation applies a
+%   fractional sample delay (linear interpolation) and a 1/r spreading
+%   gain clamped at cfg.distance_ref:
 %
-%   Two wiring modes are offered via cfg.mixer.mode:
+%       mic_m[n] = sum over s ∈ {speech, drone, env}
+%                      gain_s(m) · src_s[n - frac_delay_s(m)]
 %
-%   'perChannel'  (demo/default)
-%       mic-1  = speech + drone + env   (input mic captures the full
-%                                        scene — the realistic noisy
-%                                        speech the user actually hears)
-%       mic-2  = drone   (virtual drone-side reference, noise-only)
-%       mic-3  = env     (virtual env-side reference,  noise-only)
-%       extra mics replicate mic-1 with per-mic speech TDOA.
-%       composite = mic-1 by default (already a complete noisy mix).
-%       'sum' and 'mean' remain available for legacy diagnostics.
+%   This wiring matches what the rest of the Q-WiSE pipeline expects:
+%     * the VAD consumes a single mono signal (composite — typically the
+%       reference mic), and
+%     * the MWF consumes the full N-channel block returned by mix().
 %
-%   'physical'   (research-grade)
-%       every mic receives every source with per-source integer-sample
-%       TDOA and a 1/d spreading gain clamped at cfg.distance_ref.
-%       composite = reference-mic channel.
+%   Fractional delays that exceed one block are handled with a per-source
+%   history ring buffer, so block boundaries do not click.
 %
 %   Interface:
 %       obj  = SourceMixer(cfg, geo)
 %       mic  = obj.mix(speech, drone, env)         % [N x n_mics]
-%       comp = obj.composite(mic)                  % [N x 1]
+%       comp = obj.composite(mic)                  % [N x 1]    (VAD feed)
+%       obj.reset()
 %
-%   History buffers are carried across calls so TDOAs that exceed one
-%   block do not produce clicks.
+%   The `composite` reduction (default = reference mic) is controlled by
+%   cfg.mixer.composite ∈ {'mic1', 'sum', 'mean'}.
 
     properties
         cfg
         geo
         n_mics
-        mode              % 'perChannel' | 'physical'
-        composite_kind    % 'mic1' | 'sum' | 'mean'
-        hist_len          % ring-buffer length in samples
+        composite_kind         % 'mic1' | 'sum' | 'mean'
+        mode = 'physical'      % retained for UI / status display
+        hist_len               % history ring length in samples
     end
 
     properties (Access = private)
-        hist_speech       % [hist_len x 1]
-        hist_drone        % [hist_len x 1]
-        hist_env          % [hist_len x 1]
+        hist_speech            % [hist_len x 1]
+        hist_drone             % [hist_len x 1]
+        hist_env               % [hist_len x 1]
+        ref_mic_idx
+        frac_delays_speech_
+        frac_delays_drone_
+        frac_delays_env_
+        gains_speech_
+        gains_drone_
+        gains_env_
     end
 
     methods
@@ -52,19 +54,27 @@ classdef SourceMixer < handle
             obj.geo    = geo;
             obj.n_mics = cfg.n_mics;
 
-            obj.mode           = 'perChannel';
             obj.composite_kind = 'mic1';
-            if isfield(cfg, 'mixer')
-                if isfield(cfg.mixer, 'mode'), obj.mode = cfg.mixer.mode; end
-                if isfield(cfg.mixer, 'composite')
-                    obj.composite_kind = cfg.mixer.composite;
-                end
+            if isfield(cfg, 'mixer') && isfield(cfg.mixer, 'composite')
+                obj.composite_kind = cfg.mixer.composite;
             end
 
-            tau_max = max([max(geo.delays_speech), ...
-                           max(geo.delays_drone),  ...
-                           max(geo.delays_env)]);
-            obj.hist_len = max(tau_max, 1) + cfg.frame_size;
+            obj.ref_mic_idx = obj.resolve_ref_mic_();
+
+            % Cache delays and gains as columns once — read every block.
+            obj.frac_delays_speech_ = obj.fetch_frac_delays_(geo, 'speech');
+            obj.frac_delays_drone_  = obj.fetch_frac_delays_(geo, 'drone');
+            obj.frac_delays_env_    = obj.fetch_frac_delays_(geo, 'env');
+            obj.gains_speech_       = geo.gains_speech(:);
+            obj.gains_drone_        = geo.gains_drone(:);
+            obj.gains_env_          = geo.gains_env(:);
+
+            tau_max = max([max(obj.frac_delays_speech_), ...
+                           max(obj.frac_delays_drone_),  ...
+                           max(obj.frac_delays_env_),    ...
+                           0]);
+            % Add one extra sample for the linear-interp right tap.
+            obj.hist_len = ceil(tau_max) + 1;
 
             obj.hist_speech = zeros(obj.hist_len, 1);
             obj.hist_drone  = zeros(obj.hist_len, 1);
@@ -72,13 +82,32 @@ classdef SourceMixer < handle
         end
 
         function mic = mix(obj, speech, drone, env)
-        %MIX  Combine three sources into an n_mics-channel frame.
+        %MIX  Run one block through the physical multi-source mixer.
+        %   Inputs are coerced to column vectors and padded with zeros to
+        %   the longest of the three. Output is [N x n_mics] where every
+        %   mic carries speech + drone + env with its own TDOA + 1/r gain.
             [speech, drone, env, N] = obj.coerce_sources_(speech, drone, env);
-            switch lower(obj.mode)
-                case 'perchannel'
-                    mic = obj.mix_per_channel_(speech, drone, env, N);
-                otherwise
-                    mic = obj.mix_physical_(speech, drone, env, N);
+
+            % Build concatenated [history; current] tapes for each source.
+            sp_tape = [obj.hist_speech; speech];
+            dr_tape = [obj.hist_drone;  drone];
+            en_tape = [obj.hist_env;    env];
+            base    = obj.hist_len;                 % index of sample-0-of-block - 1
+
+            mic = zeros(N, obj.n_mics);
+            n_idx = (1:N).';
+            for m = 1:obj.n_mics
+                s_q = (base + n_idx) - obj.frac_delays_speech_(m);
+                d_q = (base + n_idx) - obj.frac_delays_drone_(m);
+                e_q = (base + n_idx) - obj.frac_delays_env_(m);
+
+                s = obj.frac_tap_(sp_tape, s_q);
+                d = obj.frac_tap_(dr_tape, d_q);
+                e = obj.frac_tap_(en_tape, e_q);
+
+                mic(:, m) = obj.gains_speech_(m) * s + ...
+                            obj.gains_drone_(m)  * d + ...
+                            obj.gains_env_(m)    * e;
             end
 
             obj.hist_speech = obj.push_(obj.hist_speech, speech);
@@ -87,18 +116,20 @@ classdef SourceMixer < handle
         end
 
         function y = composite(obj, mic)
-        %COMPOSITE  Reduce the multi-channel mix down to one mono VAD feed.
-        %   In perChannel mode mic-1 already carries the realistic noisy
-        %   speech, so 'mic1' is the sensible default; summing or meaning
-        %   would double-count noise (mic-2 and mic-3 are noise-only).
+        %COMPOSITE  Reduce the N-channel mix to one mono signal for the VAD.
+        %   The default 'mic1' returns the reference microphone (the
+        %   channel the VAD treats as its input). 'sum' and 'mean' are
+        %   kept for diagnostics.
             if isempty(mic)
                 y = zeros(obj.cfg.frame_size, 1);
                 return;
             end
             switch lower(obj.composite_kind)
-                case 'mean',  y = mean(mic, 2);
-                case 'sum',   y = sum(mic, 2);
-                otherwise,    y = mic(:, 1);   % default: 'mic1'
+                case 'mean', y = mean(mic, 2);
+                case 'sum',  y = sum(mic, 2);
+                otherwise                                    % 'mic1' / ref mic
+                    ref = min(obj.ref_mic_idx, size(mic, 2));
+                    y = mic(:, ref);
             end
         end
 
@@ -106,6 +137,10 @@ classdef SourceMixer < handle
             obj.hist_speech(:) = 0;
             obj.hist_drone(:)  = 0;
             obj.hist_env(:)    = 0;
+        end
+
+        function ref = ref_mic(obj)
+            ref = obj.ref_mic_idx;
         end
     end
 
@@ -120,99 +155,54 @@ classdef SourceMixer < handle
             if numel(env)    < N, env(end+1:N,1)    = 0; end
         end
 
-        function mic = mix_per_channel_(obj, speech, drone, env, N)
-        %MIX_PER_CHANNEL_  mic-1 captures the whole scene; mic-2/3 are
-        %   noise-only references, which is the configuration the MWF
-        %   needs (one noisy ref + dedicated noise observations).
-        %       mic-1 = g_d * speech + drone + env  (input mic, outdoor)
-        %       mic-2 = drone
-        %       mic-3 = env
-        %   The speech term on mic-1 is attenuated by distance_to_gain
-        %   evaluated at the human-to-ref-mic distance, so the simulator
-        %   behaves like a real outdoor scene: as the human moves farther
-        %   from the drone the captured speech level drops in steps
-        %   (see core/distance_to_gain.m for the band table). Drone and
-        %   environment channels are NOT touched by the speech-distance
-        %   gain — they keep their user-slider levels and remain valid
-        %   noise-only references for the MWF.
-        %
-        %   Extra mics (n_mics > 3) replay the noisy speech with per-mic
-        %   speech TDOA so a larger ULA can still be exercised.
-            mic = zeros(N, obj.n_mics);
-            ref = obj.ref_mic_();
-            g_speech = distance_to_gain(obj.geo.dist_speech(ref));
-            full = g_speech * speech + drone + env;     % outdoor noisy mic
-            if obj.n_mics >= 1
-                mic(:, 1) = full;
-            end
-            if obj.n_mics >= 2
-                mic(:, 2) = drone;
-            end
-            if obj.n_mics >= 3
-                mic(:, 3) = env;
-            end
-            for m = 4:obj.n_mics
-                mic(:, m) = obj.tap_(obj.hist_speech, full, ...
-                                     obj.geo.delays_speech(m));
-            end
-        end
-
-        function mic = mix_physical_(obj, speech, drone, env, N)
-        %MIX_PHYSICAL_  Each mic receives all 3 sources (TDOA + 1/d gain).
-            mic = zeros(N, obj.n_mics);
-            for m = 1:obj.n_mics
-                s = obj.tap_(obj.hist_speech, speech, obj.geo.delays_speech(m));
-                d = obj.tap_(obj.hist_drone,  drone,  obj.geo.delays_drone(m));
-                e = obj.tap_(obj.hist_env,    env,    obj.geo.delays_env(m));
-                mic(:, m) = obj.geo.gains_speech(m) * s ...
-                          + obj.geo.gains_drone(m)  * d ...
-                          + obj.geo.gains_env(m)    * e;
-            end
-        end
-    end
-
-    methods (Access = private)
-        function ref = ref_mic_(obj)
-        %REF_MIC_  Index of the reference (input) microphone — the
-        %   channel that carries the realistic noisy speech in
-        %   perChannel mode. Defaults to 1 if cfg.mwf.ref_mic is absent.
-            ref = 1;
-            if isfield(obj.cfg, 'mwf') && isfield(obj.cfg.mwf, 'ref_mic')
-                ref = obj.cfg.mwf.ref_mic;
-            end
-        end
-
-        function y = tap_(obj, hist, src, tau)
-        %TAP_  Produce a length-N block delayed by TAU samples.
-        %   Samples older than N come from the history ring; newer ones
-        %   come from the current block.  hist is kept newest-last.
-            src = src(:);
-            N   = numel(src);
-            tau = double(tau);
-            if tau <= 0
-                y = src;
-                return;
-            end
-            if tau >= N
-                % Entire output pulled from history.
-                idx = (obj.hist_len - tau + 1):(obj.hist_len - tau + N);
-            else
-                % Mix: leading samples from history, trailing from src.
-                idx_hist = (obj.hist_len - tau + 1):obj.hist_len;
-                y = [hist(idx_hist); src(1:N-tau)];
-                return;
-            end
-            y = hist(idx);
+        function y = frac_tap_(~, tape, q)
+        %FRAC_TAP_  Linear-interpolated tap into a [history; current] tape.
+        %   q is a column of query indices (1-based). Anything outside the
+        %   tape reads as zero (no aliasing from the end). The tape is
+        %   tall enough that q is always > 0 here (TDOA referenced from
+        %   min == 0 keeps the leading samples in-block).
+            L  = numel(tape);
+            q0 = floor(q);
+            qf = q - q0;
+            in = (q0 >= 1) & (q0 + 1 <= L);
+            y  = zeros(numel(q), 1);
+            % Linear interpolation between the two nearest tape samples.
+            idx_a = max(min(q0,     L), 1);
+            idx_b = max(min(q0 + 1, L), 1);
+            interp = (1 - qf) .* tape(idx_a) + qf .* tape(idx_b);
+            y(in) = interp(in);
+            % Tail samples that miss the tape stay at zero (silence).
+            unused = ~in; %#ok<NASGU>  % kept for future debugging hooks
         end
 
         function h = push_(obj, h, src)
-        %PUSH_  Advance the history ring, keeping the newest hist_len samples.
+        %PUSH_  Slide the history ring left, append `src` on the right.
             N = numel(src);
             if N >= obj.hist_len
                 h = src(end-obj.hist_len+1:end);
             else
                 h = [h(N+1:end); src(:)];
             end
+        end
+
+        function tau = fetch_frac_delays_(~, geo, which)
+        %FETCH_FRAC_DELAYS_  Read fractional delays for one source; fall
+        %   back to the integer field if a caller passed an older geo
+        %   struct without frac_delays_*.
+            name = ['frac_delays_' which];
+            if isfield(geo, name)
+                tau = geo.(name)(:);
+                return;
+            end
+            tau = double(geo.(['delays_' which])(:));
+        end
+
+        function ref = resolve_ref_mic_(obj)
+            ref = 1;
+            if isfield(obj.cfg, 'mwf') && isfield(obj.cfg.mwf, 'ref_mic')
+                ref = obj.cfg.mwf.ref_mic;
+            end
+            ref = max(1, min(ref, obj.n_mics));
         end
     end
 end

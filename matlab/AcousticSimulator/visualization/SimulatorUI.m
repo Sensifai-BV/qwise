@@ -42,6 +42,7 @@ classdef SimulatorUI < handle
         vad_on          = false   % run VAD stage in the pipeline
         mwf_on          = false   % run MWF stage in the pipeline (requires VAD)
         recording       = false   % is a WAV capture in progress
+        rec_kind_       = ''      % '' | 'mwf' | 'vad' | 'multi'
     end
 
     properties (Access = private)
@@ -218,7 +219,8 @@ classdef SimulatorUI < handle
             % --- Scene summary ---
             bpf = round(cfg.drone_rpm * cfg.drone_blades / 60);
             gstr = sprintf([ ...
-                'Wiring     : %s\n' ...
+                'Wiring     : physical (%d mics)\n' ...
+                'Geometry   : %s\n' ...
                 'Composite  : %s\n' ...
                 'Human      : %.0f cm\n' ...
                 'Mouth z    : %.2f m\n' ...
@@ -231,7 +233,8 @@ classdef SimulatorUI < handle
                 'Drone gain : %.2f\n' ...
                 'Env gain   : %.2f\n' ...
                 'VAD        : %s'], ...
-                obj.mixer.mode, obj.mixer.composite_kind, ...
+                cfg.n_mics, ...
+                cfg.mic_geometry, obj.mixer.composite_kind, ...
                 cfg.human_height*100, cfg.mouth_height, obj.geo.drone_agl, ...
                 norm(obj.geo.pos_drone - obj.geo.pos_human), cfg.ground_R, ...
                 bpf, cfg.mic_spacing*100, ...
@@ -316,7 +319,7 @@ classdef SimulatorUI < handle
 
             mc = {[0.00 0.78 0.32], [0.00 0.55 0.95], [1.00 0.52 0.00], ...
                   [0.95 0.35 0.75], [0.60 0.85 0.20]};
-            per_channel = strcmpi(obj.mixer.mode, 'perChannel');
+            ref_mic = obj.mixer.ref_mic();
             obj.H.ax_wav = gobjects(cfg.n_mics, 1);
             obj.H.hlines = gobjects(cfg.n_mics, 1);
             for m = 1:cfg.n_mics
@@ -331,13 +334,15 @@ classdef SimulatorUI < handle
                 grid(obj.H.ax_wav(m), 'on');
                 ylim(obj.H.ax_wav(m), [-1.05 1.05]);
                 xlim(obj.H.ax_wav(m), [1 N]);
-                ylabel(obj.H.ax_wav(m), mic_label_(per_channel, m), ...
+                ylabel(obj.H.ax_wav(m), mic_label_(m, ref_mic), ...
                        'Color', mc{idx}, 'FontSize', 9);
-                if m == 1
+                if m == ref_mic
                     % Green-tint background patch lights up while the VAD
                     % is detecting speech (refresh_display_ toggles its
                     % FaceAlpha each tick). Created BEFORE the line plot
-                    % so the waveform draws on top.
+                    % so the waveform draws on top. The tint sits on the
+                    % reference-mic row — that channel is what the VAD
+                    % actually sees.
                     obj.H.h_mic1_speech = patch(obj.H.ax_wav(m), ...
                         'XData', [1 N N 1], ...
                         'YData', [-1.05 -1.05 1.05 1.05], ...
@@ -349,14 +354,10 @@ classdef SimulatorUI < handle
                 obj.H.hlines(m) = plot(obj.H.ax_wav(m), 1:N, zeros(N, 1), ...
                     'Color', mc{idx}, 'LineWidth', 0.75);
                 if m == 1
-                    if per_channel
-                        ttl = ['Per-Mic Sources  (Mic 1 = Speech + Drone + Env  ·  ' ...
-                               'Mic 2 = Drone  ·  Mic 3 = Env  ·  green tint = VAD speech)'];
-                    else
-                        ttl = sprintf(['Physical %d-Mic Array  (every mic receives ' ...
-                                       'speech+drone+env with TDOA + 1/d gain ·  ' ...
-                                       'green tint on Mic 1 = VAD speech)'], cfg.n_mics);
-                    end
+                    ttl = sprintf(['Physical %d-Mic Array  (every mic receives ' ...
+                                   'speech+drone+env with TDOA + 1/r gain ·  ' ...
+                                   'green tint on Mic %d = VAD speech)'], ...
+                                  cfg.n_mics, ref_mic);
                     title(obj.H.ax_wav(m), ttl, ...
                         'Color', 'w', 'FontSize', 9, 'FontWeight', 'bold');
                 end
@@ -448,7 +449,7 @@ classdef SimulatorUI < handle
 
             mic = obj.mixer.mix(speech, drone, envn);
 
-            % --- Composite feed for the VAD (mic-1 in perChannel mode) ---
+            % --- Composite feed for the VAD (reference mic of the N-mic block) ---
             comp = obj.mixer.composite(mic);
 
             % --- VAD stage (only when enabled) ---
@@ -465,9 +466,9 @@ classdef SimulatorUI < handle
                 y_enh = zeros(N, 1);
             end
 
-            % --- Recording (driven by the Processing toggles) ---
+            % --- Recording (mode was locked in at rec_start) ---
             if obj.recording
-                obj.write_recording_(comp, y_enh, is_speech);
+                obj.write_recording_(mic, comp, y_enh, is_speech);
             end
 
             obj.update_buffers_(comp, y_enh);
@@ -548,31 +549,28 @@ classdef SimulatorUI < handle
             set(obj.H.h_vad_shade, 'XData', Xs, 'YData', Ys);
         end
 
-        function write_recording_(obj, comp, y_enh, is_speech)
-        %WRITE_RECORDING_  Apply the Processing-toggle-driven recording
-        %   policy. Called once per real-time tick while obj.recording
-        %   is true.
+        function write_recording_(obj, mic, comp, y_enh, is_speech)
+        %WRITE_RECORDING_  Route the current tick into the active
+        %   recording session. The recording KIND was decided at the
+        %   moment Record was pressed and is held in obj.rec_kind_:
         %
-        %     vad_on=F, mwf_on=F → write `comp` (continuous noisy mix)
-        %     vad_on=T, mwf_on=F → write `comp` only when is_speech
-        %     vad_on=T, mwf_on=T → write `y_enh` only when is_speech
+        %     'mwf'   → mono MWF output, gated by VAD (speech only)
+        %     'vad'   → mono composite (ref mic), gated by VAD
+        %     'multi' → multichannel raw mic block (continuous)
         %
-        %   In both VAD-on cases, non-speech ticks are skipped — the
-        %   resulting WAV contains only the detected speech segments,
-        %   concatenated with no silence gaps. The (vad_on=F, mwf_on=T)
-        %   combination is impossible because the toggle cascade
-        %   auto-enables VAD whenever MWF is turned on.
-            if obj.vad_on
-                if ~is_speech
-                    return;   % skip-on-non-speech: speech-only WAV
-                end
-                if obj.mwf_on
-                    obj.audio.rec_write(y_enh);
-                else
-                    obj.audio.rec_write(comp);
-                end
-            else
-                obj.audio.rec_write(comp);
+        %   Toggling VAD/MWF mid-recording does NOT change the kind —
+        %   the user has to stop and re-start to switch.
+            switch obj.rec_kind_
+                case 'mwf'
+                    if is_speech
+                        obj.audio.rec_write(y_enh);
+                    end
+                case 'vad'
+                    if is_speech
+                        obj.audio.rec_write(comp);
+                    end
+                case 'multi'
+                    obj.audio.rec_write(mic);
             end
         end
     end
@@ -707,27 +705,55 @@ classdef SimulatorUI < handle
         end
 
         function cb_record_(obj, src)
+        %CB_RECORD_  Start/stop a recording session. The kind is decided
+        %   here, ONCE, from the current VAD/MWF toggles:
+        %
+        %     VAD+MWF on    → 'mwf'   (mono, speech-only, MWF output)
+        %     VAD on only   → 'vad'   (mono, speech-only, composite/ref)
+        %     both off      → 'multi' (N WAVs, one per mic, continuous)
+        %
+        %   Once started, toggling VAD/MWF does not change the kind.
             want_on = logical(src.Value);
             if want_on && ~obj.recording
-                path = obj.audio.rec_start();
+                if obj.vad_on
+                    rec_kind = obj.choose_vad_kind_();
+                    audio_mode = 'mono';
+                else
+                    rec_kind   = 'multi';
+                    audio_mode = 'multi';
+                end
+                path = obj.audio.rec_start(audio_mode);
                 if isempty(path)
                     set(src, 'Value', 0);
                     warndlg('Could not open recording file.', 'Q-WiSE');
                     return;
                 end
+                obj.rec_kind_ = rec_kind;
                 obj.recording = true;
-                src.String = 'Record: ● REC';
+                src.String = sprintf('Record: ● REC (%s)', rec_kind);
                 src.BackgroundColor = [0.78 0.10 0.10];
                 src.ForegroundColor = 'w';
+                fprintf('[Q-WiSE] Record kind: %s -> %s\n', rec_kind, path);
             elseif ~want_on && obj.recording
                 path = obj.audio.rec_stop();
                 obj.recording = false;
+                obj.rec_kind_ = '';
                 src.String = 'Record: OFF';
                 src.BackgroundColor = [0.22 0.22 0.22];
                 src.ForegroundColor = [0.60 0.60 0.60];
                 if ~isempty(path)
-                    fprintf('[Q-WiSE] WAV saved to %s\n', path);
+                    fprintf('[Q-WiSE] Recording saved to %s\n', path);
                 end
+            end
+        end
+
+        function k = choose_vad_kind_(obj)
+        %CHOOSE_VAD_KIND_  When VAD is on at record-start time, choose
+        %   between MWF-clean ('mwf') and VAD-gated composite ('vad').
+            if obj.mwf_on
+                k = 'mwf';
+            else
+                k = 'vad';
             end
         end
 
@@ -756,15 +782,13 @@ classdef SimulatorUI < handle
 end
 
 % ---------------------------------------------------------------------
-function s = mic_label_(per_channel, m)
-%MIC_LABEL_  Friendly ylabel for each mic row based on wiring mode.
-    if per_channel
-        switch m
-            case 1, s = 'Mic 1  Noisy';   % speech + drone + env
-            case 2, s = 'Mic 2  Drone';
-            case 3, s = 'Mic 3  Env';
-            otherwise, s = sprintf('Mic %d  Noisy·τ', m);
-        end
+function s = mic_label_(m, ref_mic)
+%MIC_LABEL_  Friendly ylabel for each mic row. Every mic now receives
+%   all three sources (speech + drone + env) with its own TDOA + 1/r
+%   gain, so we just number them; the reference channel (VAD feed) gets
+%   a small marker.
+    if m == ref_mic
+        s = sprintf('Mic %d  (ref)', m);
     else
         s = sprintf('Mic %d', m);
     end

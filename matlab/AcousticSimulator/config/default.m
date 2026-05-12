@@ -13,40 +13,51 @@ function cfg = default()
     cfg.c               = 343;           % speed of sound [m/s]
 
     % ---------------- Microphone + virtual array ---------------------
-    cfg.n_mics          = 3;             % virtual uniform linear array
+    cfg.n_mics          = 3;             % virtual array size (>=1)
     cfg.mic_spacing     = 0.10;          % m
+    cfg.mic_geometry    = 'linear';      % 'linear' | 'circular'
+                                         %   array is centred on the drone
 
     % ---------------- Scene geometry ---------------------------------
     cfg.human_height    = 1.70;          % m
     cfg.mouth_height    = 0.88 * cfg.human_height;
     cfg.slant_dist      = 2.50;          % m, speaker-to-drone slant
     cfg.elev_deg        = 30;            % deg, elevation of drone
+
+    % Drone source (relative to human mouth).
+    %   slant_dist + elev_deg + drone.azimuth_deg describe where the
+    %   drone sits in the simulation; the mic array is centred on
+    %   pos_drone in build_geometry.m.
+    cfg.drone.azimuth_deg   = 0;         % deg, 0 = drone along +x from mouth
+
+    % Environment noise source (relative to human mouth).
+    %   Treated as a single point source, independent of the drone, so the
+    %   physical mixer can give it its own TDOA + 1/r gain on every mic.
+    cfg.env.distance_from_mouth = 8.0;   % m
+    cfg.env.azimuth_deg         = 135;   % deg
+    cfg.env.elevation_deg       = 0;     % deg
+
     cfg.drone_rpm       = 8000;
     cfg.drone_blades    = 3;
-    cfg.ground_R        = 0.90;          % asphalt reflection coeff
-    cfg.alpha_air_dB    = 0.004;         % dB/m/kHz air absorption
-    cfg.distance_ref    = 1.0;           % m  — 1/d law reference; gains
+    cfg.ground_R        = 0.90;          % asphalt reflection coeff (scene viz only)
+    cfg.alpha_air_dB    = 0.004;         % dB/m/kHz air absorption  (scene viz only)
+    cfg.distance_ref    = 1.0;           % m  — 1/r law reference; gains
                                          %       are clamped so d<d_ref
                                          %       gives unity (no boost).
 
     % ---------------- Noise sources ----------------------------------
     cfg.drone_wav_path  = fullfile('wavs','drone_fan.wav');
     cfg.env_wav_path    = fullfile('wavs','env_ambient.wav');
-    cfg.speech_gain_init= 1.00;          % input-mic speech level at mic-1
+    cfg.speech_gain_init= 1.00;          % live-mic speech level pre-mixer
     cfg.drone_gain_init = 0.03;
     cfg.env_gain_init   = 0.01;
 
     % ---------------- Array wiring -----------------------------------
-    %   'perChannel' : mic-1 = input speech + drone + env  (realistic
-    %                  noisy speech the input mic actually picks up)
-    %                  mic-2 = drone wav   (noise-only reference)
-    %                  mic-3 = env wav     (noise-only reference)
-    %                  composite = mic-1 (already the full noisy mix)
-    %                  feeds the VAD and listening playback.
-    %   'physical'   : every mic picks up every source with per-source
-    %                  TDOA + 1/d spreading gain (research-grade acoustic
-    %                  model — keeps the SourceMixer tests green).
-    cfg.mixer.mode      = 'perChannel';
+    %   The SourceMixer is a single physical model: every mic receives
+    %   every source with fractional delay + 1/r gain (mixer_1.m-style).
+    %   `composite` controls how the N-channel block is reduced to one
+    %   mono signal for the VAD ('mic1' = reference mic, 'sum', 'mean').
+    cfg.mixer.mode      = 'physical';    % only valid value (legacy field)
     cfg.mixer.composite = 'mic1';        % 'mic1' | 'sum' | 'mean'
 
     % ---------------- VAD --------------------------------------------
@@ -92,13 +103,16 @@ function cfg = default()
     cfg.mwf.passthrough       = true;        % bypass MWF, return reference mic
 
     % ---------------- Recording --------------------------------------
-    %   What gets written is decided at runtime by the Processing toggles:
-    %     vad_on=F, mwf_on=F → noisy mix (continuous)
-    %     vad_on=T, mwf_on=F → noisy mix gated by VAD (speech-only)
-    %     vad_on=T, mwf_on=T → MWF-cleaned speech, gated by VAD
-    %   See SimulatorUI.write_recording_ for the implementation.
+    %   Mode is locked in at the moment the Record button is pressed:
+    %     vad_on=F, mwf_on=F → 'multi'  — one WAV per mic, written into
+    %                                      a timestamped sub-folder
+    %     vad_on=T, mwf_on=F → 'mono'   — composite (ref-mic) only during
+    %                                      VAD-detected speech
+    %     vad_on=T, mwf_on=T → 'mono'   — MWF output only during
+    %                                      VAD-detected speech
     cfg.record.dir            = 'recordings';
     cfg.record.prefix         = 'qwise';
+    cfg.record.multi_subdir   = 'multi';     % name of subfolder for multi-mic captures
 
     % ---------------- Visualization ----------------------------------
     cfg.ui.spec_ncols         = 90;

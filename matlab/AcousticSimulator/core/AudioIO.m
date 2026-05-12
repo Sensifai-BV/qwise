@@ -11,11 +11,17 @@ classdef AudioIO < handle
 %   chunk      = obj.next_drone_chunk(N)    % next N samples of drone loop
 %   chunk      = obj.next_env_chunk(N)      % next N samples of env loop
 %
-%   Real-time recording (independent of VAD / MWF):
-%                obj.rec_start(path)        % open a wav sink
-%                obj.rec_write(x)           % append mono samples
-%   path       = obj.rec_stop()             % close and return file path
-%   tf         = obj.is_recording()         % true while recording
+%   Recording supports two modes, locked in at rec_start time:
+%     'mono'  → single mono WAV  (rec_write accepts [N×1])
+%     'multi' → one WAV per mic  (rec_write accepts [N×n_mics]); on
+%               rec_stop, files are written into a timestamped folder.
+%
+%                path  = obj.rec_start('mono')   % returns path to .wav
+%                base  = obj.rec_start('multi')  % returns the folder
+%                obj.rec_write(x)
+%   path_or_dir = obj.rec_stop()                % closes; returns location
+%   tf          = obj.is_recording()
+%   mode        = obj.rec_mode()                % '' | 'mono' | 'multi'
 %
 %                obj.release()              % free the audio devices
 
@@ -32,10 +38,13 @@ classdef AudioIO < handle
         drone_ptr = 1
         env_ptr   = 1
         rec_active_ = false
-        rec_buf_    = zeros(0, 1)   % in-memory accumulation
-        rec_path_   = ''
-        rec_cap_    = 0             % allocated capacity of rec_buf_
-        rec_len_    = 0             % valid length in rec_buf_
+        rec_mode_   = ''            % '' | 'mono' | 'multi'
+        rec_path_   = ''            % file (mono) or folder (multi)
+        rec_buf_    = zeros(0, 1)   % mono   accumulator
+        rec_bufM_   = zeros(0, 0)   % multi  accumulator [samples × n_mics]
+        rec_cap_    = 0
+        rec_len_    = 0
+        rec_n_ch_   = 1
     end
 
     methods
@@ -73,82 +82,151 @@ classdef AudioIO < handle
         end
 
         % ---------------- Recording --------------------------------
-        % Recording uses an in-memory buffer that is flushed to disk
-        % exactly once, on rec_stop().  This avoids any partial-header
-        % issues seen with streaming system objects (dsp.AudioFileWriter)
-        % when the file is inspected mid-recording: the WAV on disk is
-        % always either absent or complete.
+        % Recording uses an in-memory buffer flushed to disk on stop.
+        % This keeps the WAV header consistent (file is always either
+        % absent or complete) and avoids partial-multi-channel writes.
 
-        function path = rec_start(obj, path)
-        %REC_START  Begin accumulating a mono WAV recording.
-        %   If PATH is omitted, generates a timestamped file under
-        %   cfg.record.dir.  The file is NOT created until rec_stop().
-            if nargin < 2 || isempty(path)
-                path = obj.default_rec_path_();
+        function dst = rec_start(obj, mode, path)
+        %REC_START  Open a recording session.
+        %   mode = 'mono'  → records a single mono WAV;
+        %   mode = 'multi' → records one mono WAV per mic into a
+        %                    timestamped folder under cfg.record.dir.
+        %   Returns the resolved path (file for mono, folder for multi).
+            if nargin < 2 || isempty(mode), mode = 'mono'; end
+            mode = lower(mode);
+            if ~ismember(mode, {'mono','multi'})
+                error('AudioIO:rec_start:UnknownMode', ...
+                      'mode must be ''mono'' or ''multi'' (got %s).', mode);
             end
-            [d, ~, ~] = fileparts(path);
-            if ~isempty(d) && exist(d, 'dir') ~= 7
-                mkdir(d);
+            if obj.rec_active_
+                warning('QWiSE:AudioIO:AlreadyRecording', ...
+                        '[Q-WiSE] rec_start called while a recording is active.');
+                dst = obj.rec_path_;
+                return;
             end
-            % Pre-allocate ~30 s of capacity; grown geometrically on need.
-            obj.rec_cap_    = 30 * obj.cfg.fs;
-            obj.rec_buf_    = zeros(obj.rec_cap_, 1);
-            obj.rec_len_    = 0;
+
+            obj.rec_mode_ = mode;
+            obj.rec_len_  = 0;
+            obj.rec_cap_  = 30 * obj.cfg.fs;     % ~30 s initial capacity
+
+            switch mode
+                case 'mono'
+                    if nargin < 3 || isempty(path)
+                        path = obj.default_rec_path_('wav');
+                    end
+                    obj.ensure_dir_(fileparts(path));
+                    obj.rec_n_ch_ = 1;
+                    obj.rec_buf_  = zeros(obj.rec_cap_, 1);
+                    obj.rec_bufM_ = zeros(0, 0);
+                case 'multi'
+                    if nargin < 3 || isempty(path)
+                        path = obj.default_rec_path_('dir');
+                    end
+                    obj.ensure_dir_(path);
+                    obj.rec_n_ch_ = obj.cfg.n_mics;
+                    obj.rec_buf_  = zeros(0, 1);
+                    obj.rec_bufM_ = zeros(obj.rec_cap_, obj.rec_n_ch_);
+            end
+
             obj.rec_path_   = path;
             obj.rec_active_ = true;
-            fprintf('[Q-WiSE] Recording started -> %s\n', path);
+            dst             = path;
+            fprintf('[Q-WiSE] Recording (%s) started -> %s\n', mode, path);
         end
 
         function rec_write(obj, x)
-        %REC_WRITE  Append a mono block to the active recording buffer.
+        %REC_WRITE  Append a block to the active recording.
+        %   In 'mono' mode x is [N×1].
+        %   In 'multi' mode x is [N×n_mics] (one column per microphone).
             if ~obj.rec_active_, return; end
-            x  = max(min(x(:), 1), -1);
-            nx = numel(x);
-            need = obj.rec_len_ + nx;
-            if need > obj.rec_cap_
-                new_cap = max(need, 2 * obj.rec_cap_);
-                tmp = zeros(new_cap, 1);
-                tmp(1:obj.rec_len_) = obj.rec_buf_(1:obj.rec_len_);
-                obj.rec_buf_ = tmp;
-                obj.rec_cap_ = new_cap;
+            switch obj.rec_mode_
+                case 'mono'
+                    x  = max(min(x(:), 1), -1);
+                    nx = numel(x);
+                    obj.grow_mono_(obj.rec_len_ + nx);
+                    obj.rec_buf_(obj.rec_len_+1 : obj.rec_len_+nx) = x;
+                    obj.rec_len_ = obj.rec_len_ + nx;
+                case 'multi'
+                    if size(x, 2) ~= obj.rec_n_ch_
+                        warning('QWiSE:AudioIO:ChannelMismatch', ...
+                            '[Q-WiSE] rec_write got %d channels, expected %d.', ...
+                            size(x, 2), obj.rec_n_ch_);
+                        return;
+                    end
+                    xm = max(min(x, 1), -1);
+                    nx = size(xm, 1);
+                    obj.grow_multi_(obj.rec_len_ + nx);
+                    obj.rec_bufM_(obj.rec_len_+1 : obj.rec_len_+nx, :) = xm;
+                    obj.rec_len_ = obj.rec_len_ + nx;
             end
-            obj.rec_buf_(obj.rec_len_+1 : obj.rec_len_+nx) = x;
-            obj.rec_len_ = obj.rec_len_ + nx;
         end
 
-        function path = rec_stop(obj)
-        %REC_STOP  Flush the in-memory buffer to a 16-bit WAV and return path.
-            path = obj.rec_path_;
+        function dst = rec_stop(obj)
+        %REC_STOP  Flush buffers to disk and close the session.
+        %   Returns the file path (mono) or the folder path (multi).
+            dst = obj.rec_path_;
             if ~obj.rec_active_
-                path = '';
+                dst = '';
                 return;
             end
             obj.rec_active_ = false;
-            y = obj.rec_buf_(1:obj.rec_len_);
-            obj.rec_buf_    = zeros(0, 1);
-            obj.rec_cap_    = 0;
-            obj.rec_len_    = 0;
-            obj.rec_path_   = '';
+            mode = obj.rec_mode_;
+
             try
-                if ~isempty(y)
-                    audiowrite(path, y, obj.cfg.fs, ...
-                        'BitsPerSample', 16);
-                    fprintf('[Q-WiSE] Recording stopped -> %s (%.2f s)\n', ...
-                        path, numel(y) / obj.cfg.fs);
-                else
-                    fprintf(['[Q-WiSE] Recording stopped with ' ...
-                             'no samples — file not written.\n']);
-                    path = '';
+                switch mode
+                    case 'mono'
+                        y = obj.rec_buf_(1:obj.rec_len_);
+                        if ~isempty(y)
+                            audiowrite(obj.rec_path_, y, obj.cfg.fs, ...
+                                       'BitsPerSample', 16);
+                            fprintf('[Q-WiSE] Recording stopped -> %s (%.2f s)\n', ...
+                                obj.rec_path_, numel(y) / obj.cfg.fs);
+                        else
+                            fprintf(['[Q-WiSE] Recording stopped with no ' ...
+                                     'samples — nothing written.\n']);
+                            dst = '';
+                        end
+                    case 'multi'
+                        Y = obj.rec_bufM_(1:obj.rec_len_, :);
+                        if isempty(Y)
+                            fprintf(['[Q-WiSE] Multi recording stopped with no ' ...
+                                     'samples — nothing written.\n']);
+                            dst = '';
+                        else
+                            for m = 1:obj.rec_n_ch_
+                                fn = fullfile(obj.rec_path_, ...
+                                              sprintf('mic%02d.wav', m));
+                                audiowrite(fn, Y(:, m), obj.cfg.fs, ...
+                                           'BitsPerSample', 16);
+                            end
+                            fprintf(['[Q-WiSE] Multi recording stopped -> %s ' ...
+                                     '(%d mic files, %.2f s)\n'], ...
+                                obj.rec_path_, obj.rec_n_ch_, ...
+                                size(Y,1) / obj.cfg.fs);
+                        end
                 end
             catch ME
                 warning('QWiSE:AudioIO:RecFlush', ...
                     '[Q-WiSE] rec flush failed: %s', ME.message);
-                path = '';
+                dst = '';
             end
+
+            % Reset state.
+            obj.rec_buf_  = zeros(0, 1);
+            obj.rec_bufM_ = zeros(0, 0);
+            obj.rec_cap_  = 0;
+            obj.rec_len_  = 0;
+            obj.rec_n_ch_ = 1;
+            obj.rec_path_ = '';
+            obj.rec_mode_ = '';
         end
 
         function tf = is_recording(obj)
             tf = obj.rec_active_;
+        end
+
+        function m = rec_mode(obj)
+            m = obj.rec_mode_;
         end
 
         function release(obj)
@@ -160,6 +238,32 @@ classdef AudioIO < handle
     end
 
     methods (Access = private)
+        function grow_mono_(obj, need)
+            if need > obj.rec_cap_
+                new_cap = max(need, 2 * obj.rec_cap_);
+                tmp = zeros(new_cap, 1);
+                tmp(1:obj.rec_len_) = obj.rec_buf_(1:obj.rec_len_);
+                obj.rec_buf_ = tmp;
+                obj.rec_cap_ = new_cap;
+            end
+        end
+
+        function grow_multi_(obj, need)
+            if need > obj.rec_cap_
+                new_cap = max(need, 2 * obj.rec_cap_);
+                tmp = zeros(new_cap, obj.rec_n_ch_);
+                tmp(1:obj.rec_len_, :) = obj.rec_bufM_(1:obj.rec_len_, :);
+                obj.rec_bufM_ = tmp;
+                obj.rec_cap_  = new_cap;
+            end
+        end
+
+        function ensure_dir_(~, d)
+            if ~isempty(d) && exist(d, 'dir') ~= 7
+                mkdir(d);
+            end
+        end
+
         function [adr, n_ch] = create_reader_(obj)
             c   = obj.cfg;
             dev = find_input_mic();
@@ -183,12 +287,23 @@ classdef AudioIO < handle
             end
         end
 
-        function p = default_rec_path_(obj)
+        function p = default_rec_path_(obj, kind)
+        %DEFAULT_REC_PATH_  Build a timestamped file (kind='wav') or
+        %   folder (kind='dir') path under cfg.record.dir.
             dir_ = obj.cfg.record.dir;
             if ~isfolder(dir_), mkdir(dir_); end
             stamp = datestr(now, 'yyyymmdd_HHMMSS'); %#ok<DATST,TNOW1>
-            p = fullfile(dir_, sprintf('%s_%s.wav', ...
-                obj.cfg.record.prefix, stamp));
+            prefix = obj.cfg.record.prefix;
+            if strcmpi(kind, 'dir')
+                sub = 'multi';
+                if isfield(obj.cfg.record, 'multi_subdir') ...
+                        && ~isempty(obj.cfg.record.multi_subdir)
+                    sub = obj.cfg.record.multi_subdir;
+                end
+                p = fullfile(dir_, sprintf('%s_%s_%s', prefix, sub, stamp));
+            else
+                p = fullfile(dir_, sprintf('%s_%s.wav', prefix, stamp));
+            end
         end
     end
 end
