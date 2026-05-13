@@ -83,7 +83,7 @@ function cfg = default()
     %   Mask params (batch) : threshold + context frames driving the
     %                                   speech mask built from VAD audio
     cfg.mwf.enabled           = true;
-    cfg.mwf.method            = 'gav';       % 'gev' | 'mwf' | 'mvdr'
+    cfg.mwf.method            = 'gev';       % 'gev' | 'mwf' | 'mvdr'
     cfg.mwf.n_fft             = 1024;        % batch-mode STFT size  (matches Python)
     cfg.mwf.hop               = 256;         % batch-mode STFT hop   (matches Python)
     cfg.mwf.stft_win          = 512;         % streaming STFT window
