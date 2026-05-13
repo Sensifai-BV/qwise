@@ -13,8 +13,8 @@ function cfg = default()
     cfg.c               = 343;           % speed of sound [m/s]
 
     % ---------------- Microphone + virtual array ---------------------
-    cfg.n_mics          = 5;             % virtual array size (>=1)
-    cfg.mic_spacing     = 0.20;          % m
+    cfg.n_mics          = 3;             % virtual array size (>=1)
+    cfg.mic_spacing     = 0.10;          % m
     cfg.mic_geometry    = 'linear';      % 'linear' | 'circular'
                                          %   array is centred on the drone
 
@@ -83,7 +83,7 @@ function cfg = default()
     %   Mask params (batch) : threshold + context frames driving the
     %                                   speech mask built from VAD audio
     cfg.mwf.enabled           = true;
-    cfg.mwf.method            = 'gev';       % 'gev' | 'mwf' | 'mvdr'
+    cfg.mwf.method            = 'gav';       % 'gev' | 'mwf' | 'mvdr'
     cfg.mwf.n_fft             = 1024;        % batch-mode STFT size  (matches Python)
     cfg.mwf.hop               = 256;         % batch-mode STFT hop   (matches Python)
     cfg.mwf.stft_win          = 512;         % streaming STFT window

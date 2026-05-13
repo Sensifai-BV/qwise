@@ -55,6 +55,12 @@ classdef SimulatorUI < handle
         spec_ncols
         vad_trace
         vad_flags
+        % --- Latest-recording playback state ------------------------
+        playback_panel_           % uipanel that hosts the play buttons
+        playback_player_   = []   % active audioplayer
+        playback_active_btn_ = [] % togglebutton currently in ON state
+        playback_files_    = {}   % cellstr of WAV paths in the latest dir
+        playback_dir_      = ''   % the directory those files live in
     end
 
     methods
@@ -277,8 +283,33 @@ classdef SimulatorUI < handle
                 'String', obj.status_text_('Idle', false), ...
                 'FontSize', 8, 'BackgroundColor', [0.14 0.14 0.14], ...
                 'ForegroundColor', [0.55 0.78 0.55], ...
-                'Units', 'normalized', 'Position', [0.03 0.005 0.94 0.232], ...
+                'Units', 'normalized', 'Position', [0.03 0.176 0.94 0.064], ...
                 'HorizontalAlignment', 'left');
+
+            obj.gui_sep_(ctrl, 0.170);
+
+            % --- Latest recording playback (compact grid) ---
+            uicontrol(ctrl, 'Style', 'text', 'String', 'Latest Recording', ...
+                'FontSize', 9, 'FontWeight', 'bold', ...
+                'BackgroundColor', [0.14 0.14 0.14], ...
+                'ForegroundColor', [0.85 0.85 0.85], ...
+                'Units', 'normalized', ...
+                'Position', [0.05 0.142 0.55 0.022]);
+            obj.H.btn_refresh = uicontrol(ctrl, 'Style', 'pushbutton', ...
+                'String', 'Refresh', ...
+                'FontSize', 8, ...
+                'BackgroundColor', [0.30 0.30 0.30], ...
+                'ForegroundColor', 'w', ...
+                'Units', 'normalized', ...
+                'Position', [0.62 0.142 0.33 0.024], ...
+                'Callback', @(~,~) obj.refresh_playback_());
+            obj.playback_panel_ = uipanel(ctrl, ...
+                'BackgroundColor', [0.10 0.10 0.10], ...
+                'BorderType', 'line', ...
+                'HighlightColor', [0.25 0.25 0.25], ...
+                'Units', 'normalized', ...
+                'Position', [0.03 0.005 0.94 0.133]);
+            obj.refresh_playback_();
         end
 
         function build_scene_slider_(obj, parent, key, label, val, units, ...
@@ -925,6 +956,8 @@ classdef SimulatorUI < handle
                 if ~isempty(path)
                     fprintf('[Q-WiSE] Recording saved to %s\n', path);
                 end
+                % Surface the new files in the playback panel.
+                obj.refresh_playback_();
             end
         end
 
@@ -938,11 +971,167 @@ classdef SimulatorUI < handle
             if isempty(s), s = 'none'; end
         end
 
+        % ==================================================================
+        %  PLAYBACK OF LATEST RECORDING
+        % ==================================================================
+        function refresh_playback_(obj)
+        %REFRESH_PLAYBACK_  Scan cfg.record.dir for the most-recent
+        %   recording folder and render one play/stop togglebutton per
+        %   WAV inside it. Called on UI construction, after a recording
+        %   stops, and from the Refresh button.
+            obj.stop_playback_();
+
+            if isempty(obj.playback_panel_) || ~isvalid(obj.playback_panel_)
+                return;
+            end
+
+            rec_dir = obj.Cfg.record.dir;
+            obj.playback_files_ = {};
+            obj.playback_dir_   = '';
+            delete(obj.playback_panel_.Children);
+
+            if ~isfolder(rec_dir)
+                obj.render_playback_empty_('No recordings yet.');
+                return;
+            end
+
+            % Pick the most recently-modified subfolder. Sessions are
+            % always folders ("qwise_multi_YYYYMMDD_HHMMSS") so that's
+            % the only kind we list.
+            d = dir(rec_dir);
+            d = d([d.isdir] & ~startsWith({d.name}, '.'));
+            if isempty(d)
+                obj.render_playback_empty_('No recording folders.');
+                return;
+            end
+            [~, ord] = sort([d.datenum], 'descend');
+            latest = fullfile(rec_dir, d(ord(1)).name);
+
+            wavs = dir(fullfile(latest, '*.wav'));
+            if isempty(wavs)
+                [~, leaf] = fileparts(latest);
+                obj.render_playback_empty_(sprintf('(empty) %s', leaf));
+                return;
+            end
+            [~, ord_w] = sort({wavs.name});
+            wavs = wavs(ord_w);
+
+            obj.playback_dir_   = latest;
+            obj.playback_files_ = arrayfun( ...
+                @(w) fullfile(w.folder, w.name), wavs, 'UniformOutput', false);
+            obj.render_playback_files_({wavs.name});
+        end
+
+        function render_playback_files_(obj, names)
+        %RENDER_PLAYBACK_FILES_  Build one row per WAV: Play/Stop button.
+            [~, leaf] = fileparts(obj.playback_dir_);
+            uicontrol(obj.playback_panel_, 'Style', 'text', ...
+                'String', leaf, ...
+                'FontSize', 7, 'BackgroundColor', [0.10 0.10 0.10], ...
+                'ForegroundColor', [0.55 0.55 0.55], ...
+                'Units', 'normalized', ...
+                'Position', [0.02 0.91 0.96 0.08], ...
+                'HorizontalAlignment', 'left');
+
+            n = numel(names);
+            usable_h  = 0.88;
+            row_h     = usable_h / max(n, 1);
+            inner_pad = 0.10;
+            for k = 1:n
+                yp = 0.01 + (n - k) * row_h;
+                uicontrol(obj.playback_panel_, 'Style', 'togglebutton', ...
+                    'String', sprintf('▶  %s', names{k}), ...
+                    'FontSize', 8, ...
+                    'BackgroundColor', [0.18 0.40 0.22], ...
+                    'ForegroundColor', 'w', ...
+                    'Units', 'normalized', ...
+                    'Position', [0.03 yp 0.94 row_h * (1 - inner_pad)], ...
+                    'UserData', struct('index', k, 'name', names{k}), ...
+                    'Callback', @(s,~) obj.cb_play_toggle_(s));
+            end
+        end
+
+        function render_playback_empty_(obj, msg)
+            uicontrol(obj.playback_panel_, 'Style', 'text', ...
+                'String', msg, ...
+                'FontSize', 8, ...
+                'BackgroundColor', [0.10 0.10 0.10], ...
+                'ForegroundColor', [0.55 0.55 0.55], ...
+                'Units', 'normalized', ...
+                'Position', [0.02 0.35 0.96 0.30], ...
+                'HorizontalAlignment', 'center');
+        end
+
+        function cb_play_toggle_(obj, src)
+        %CB_PLAY_TOGGLE_  Start playback when toggled ON, stop when OFF.
+        %   Only one file plays at a time — toggling another row stops
+        %   the previous one.
+            ud = src.UserData;
+            if logical(src.Value)
+                obj.stop_playback_();   % halt anything currently playing
+                try
+                    [y, fs] = audioread(obj.playback_files_{ud.index});
+                    if size(y, 2) > 1
+                        y = mean(y, 2);
+                    end
+                    p = audioplayer(y, fs);
+                    p.StopFcn = @(~,~) obj.cb_player_stopped_(src);
+                    play(p);
+                    obj.playback_player_     = p;
+                    obj.playback_active_btn_ = src;
+                    src.String          = sprintf('■  %s', ud.name);
+                    src.BackgroundColor = [0.78 0.10 0.10];
+                catch ME
+                    set(src, 'Value', 0);
+                    warndlg(sprintf('Could not play %s:\n%s', ud.name, ...
+                                    ME.message), 'Q-WiSE');
+                end
+            else
+                obj.stop_playback_();
+            end
+        end
+
+        function cb_player_stopped_(obj, src)
+        %CB_PLAYER_STOPPED_  audioplayer StopFcn — reached EOF or was
+        %   stopped explicitly. Reset the button visual.
+            if isvalid(src)
+                ud = src.UserData;
+                src.Value           = 0;
+                src.String          = sprintf('▶  %s', ud.name);
+                src.BackgroundColor = [0.18 0.40 0.22];
+            end
+            obj.playback_player_     = [];
+            obj.playback_active_btn_ = [];
+        end
+
+        function stop_playback_(obj)
+        %STOP_PLAYBACK_  Stop any active playback and reset its button.
+            if ~isempty(obj.playback_player_)
+                try
+                    if isvalid(obj.playback_player_) && ...
+                       isplaying(obj.playback_player_)
+                        stop(obj.playback_player_);
+                    end
+                catch
+                end
+            end
+            if ~isempty(obj.playback_active_btn_) && ...
+                    isvalid(obj.playback_active_btn_)
+                ud = obj.playback_active_btn_.UserData;
+                obj.playback_active_btn_.Value           = 0;
+                obj.playback_active_btn_.String          = sprintf('▶  %s', ud.name);
+                obj.playback_active_btn_.BackgroundColor = [0.18 0.40 0.22];
+            end
+            obj.playback_player_     = [];
+            obj.playback_active_btn_ = [];
+        end
+
         function safe_release_(obj)
             try obj.audio.release(); catch, end
         end
 
         function on_delete_(obj)
+            try obj.stop_playback_(); catch, end
             try
                 if obj.recording
                     obj.audio.rec_stop();
