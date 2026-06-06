@@ -25,9 +25,17 @@ classdef mwf < handle
 %         cfg.mwf.passthrough is true.
 %
 %   Configuration (cfg.mwf):
-%     method            'gev' | 'mwf' | 'mvdr' | 'rank1'
+%     method            'gev' | 'mwf' | 'mvdr' | 'rank1' | 'rankn'
 %                       'rank1' = closed-form rank-1 MWF with the analytic
 %                       2x2 / 3x3 noise-covariance inverse (2- and 3-mic).
+%                       'rankn' = N-mic rank-1 SDW-MWF, eig/inverse-free
+%                       (power iteration + conjugate gradient); supports any
+%                       N >= 2 and an SDW knob 'mu'. ONNX-exportable.
+%     power_iters       rankn: power-iteration refinement steps (0 = exact
+%                       rank-1 reference-column estimate)
+%     cg_iters          rankn: conjugate-gradient iterations (>= n_mics exact)
+%     post_omlsa        apply OMLSA near-zero residual suppressor (batch+stream)
+%     omlsa_floor_db    OMLSA spectral floor in dB (e.g. -30)
 %     ref_mic           1-based reference microphone index
 %     mu                SDW trade-off (used by 'mwf' only)
 %     eps_reg           numerical floor for regularization
@@ -56,6 +64,16 @@ classdef mwf < handle
         gain_floor
         noise_floor_alpha
         pf_smooth_kernel
+        % --- rankn solver knobs (SDW + ONNX-friendly, eig/inverse-free) ----
+        power_iters
+        cg_iters
+        % --- OMLSA post-suppressor (near-zero residual) -------------------
+        post_omlsa
+        omlsa_floor_db
+        omlsa_alpha_dd
+        omlsa_alpha_s
+        omlsa_alpha_d
+        omlsa_win_min
         % --- batch mask params --------------------------------------
         mask_threshold
         mask_context
@@ -79,6 +97,14 @@ classdef mwf < handle
     properties (Access = private)
         in_buf      % [Lwin x n_mics] analysis ring
         ola_buf     % [Lwin x 1]      output overlap-add tail
+        % --- streaming OMLSA state (per frequency bin) --------------------
+        pf_lam      % [nbin x 1] noise PSD estimate
+        pf_S        % [nbin x 1] smoothed power
+        pf_Gp       % [nbin x 1] previous gain
+        pf_gam_p    % [nbin x 1] previous a posteriori SNR
+        pf_minbuf   % [nbin x win_min] running-minimum ring
+        pf_bptr     % scalar ring pointer
+        pf_primed   % logical, noise PSD initialized yet
     end
 
     methods
@@ -95,6 +121,16 @@ classdef mwf < handle
             obj.pf_smooth_kernel  = field_or_(cfg.mwf, 'pf_smooth_kernel', 3);
             obj.mask_threshold    = field_or_(cfg.mwf, 'mask_threshold', 0.01);
             obj.mask_context      = field_or_(cfg.mwf, 'mask_context', 3);
+            % --- rankn solver knobs ------------------------------------
+            obj.power_iters       = field_or_(cfg.mwf, 'power_iters', 0);
+            obj.cg_iters          = field_or_(cfg.mwf, 'cg_iters', cfg.n_mics);
+            % --- OMLSA post-suppressor ---------------------------------
+            obj.post_omlsa        = field_or_(cfg.mwf, 'post_omlsa', false);
+            obj.omlsa_floor_db    = field_or_(cfg.mwf, 'omlsa_floor_db', -30);
+            obj.omlsa_alpha_dd    = field_or_(cfg.mwf, 'omlsa_alpha_dd', 0.92);
+            obj.omlsa_alpha_s     = field_or_(cfg.mwf, 'omlsa_alpha_s', 0.90);
+            obj.omlsa_alpha_d     = field_or_(cfg.mwf, 'omlsa_alpha_d', 0.85);
+            obj.omlsa_win_min     = field_or_(cfg.mwf, 'omlsa_win_min', 60);
             obj.n_fft             = field_or_(cfg.mwf, 'n_fft', 1024);
             obj.hop               = field_or_(cfg.mwf, 'hop', 256);
             obj.Lwin              = cfg.mwf.stft_win;
@@ -111,6 +147,7 @@ classdef mwf < handle
             obj.Rss   = repmat(I0, obj.nbin, 1, 1);
             obj.in_buf  = zeros(obj.Lwin, obj.n_mics);
             obj.ola_buf = zeros(obj.Lwin, 1);
+            obj.init_omlsa_state_();
 
             validate_method_(obj.method);
         end
@@ -190,6 +227,13 @@ classdef mwf < handle
                                           obj.eps_reg, ...
                                           obj.pf_smooth_kernel);
             end
+            if obj.post_omlsa
+                % Near-zero residual suppression (continuous noise tracking).
+                Y = mwf_omlsa_postfilter(Y, obj.omlsa_floor_db, ...
+                                         obj.omlsa_alpha_dd, obj.omlsa_alpha_s, ...
+                                         obj.omlsa_alpha_d, obj.omlsa_win_min, ...
+                                         obj.eps_reg);
+            end
 
             % ---- iSTFT + normalize ----------------------------------------
             y = mwf_istft(Y, obj.n_fft, obj.hop);
@@ -237,6 +281,10 @@ classdef mwf < handle
                     W  = obj.compute_streaming_weights_();
                     Yf = sum(conj(W) .* Xf, 2);
 
+                    if obj.post_omlsa
+                        Yf = obj.omlsa_step_(Yf);
+                    end
+
                     Yfull = [Yf; conj(Yf(end - 1:-1:2))];
                     yblk  = real(ifft(Yfull)) .* obj.win;
 
@@ -260,6 +308,7 @@ classdef mwf < handle
             I0     = reshape(eye(obj.n_mics) * obj.eps_reg, 1, obj.n_mics, obj.n_mics);
             obj.Rnn = repmat(I0, obj.nbin, 1, 1);
             obj.Rss = repmat(I0, obj.nbin, 1, 1);
+            obj.init_omlsa_state_();
         end
     end
 
@@ -283,6 +332,13 @@ classdef mwf < handle
                     % genuinely singular — the case the standalone code errors on.)
                     W = mwf_compute_rank1_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
                                                   obj.eps_reg, 0);
+                case 'rankn'
+                    % N-mic rank-1 SDW-MWF, eig/inverse-free (power iteration
+                    % + conjugate gradient). mu = 1 & power_iters = 0 reproduce
+                    % the rank1 result for N = 2,3; supports any N >= 2.
+                    W = mwf_compute_rankn_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
+                                                  obj.eps_reg, obj.mu, ...
+                                                  obj.power_iters, obj.cg_iters);
                 otherwise
                     W = mwf_compute_mwf_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
                                                 obj.mu, obj.eps_reg, obj.diag_load_ratio);
@@ -311,6 +367,59 @@ classdef mwf < handle
                 end
             end
         end
+
+        % =================================================================
+        %  STREAMING OMLSA POST-SUPPRESSOR (stateful, per-frame)
+        %  Mirrors mwf_omlsa_postfilter exactly, one STFT frame at a time.
+        % =================================================================
+        function init_omlsa_state_(obj)
+            nb = obj.nbin;
+            wm = max(1, obj.omlsa_win_min);
+            obj.pf_lam    = zeros(nb, 1);
+            obj.pf_S      = zeros(nb, 1);
+            obj.pf_Gp     = ones(nb, 1);
+            obj.pf_gam_p  = ones(nb, 1);
+            obj.pf_minbuf = zeros(nb, wm);
+            obj.pf_bptr   = 1;
+            obj.pf_primed = false;
+        end
+
+        function Yf = omlsa_step_(obj, Yf)
+            p = abs(Yf).^2;
+            if ~obj.pf_primed
+                obj.pf_lam    = max(p, 1e-10);
+                obj.pf_S      = max(p, 1e-10);
+                obj.pf_minbuf = repmat(obj.pf_S, 1, size(obj.pf_minbuf, 2));
+                obj.pf_primed = true;
+            end
+            a_s  = obj.omlsa_alpha_s;
+            a_d  = obj.omlsa_alpha_d;
+            a_dd = obj.omlsa_alpha_dd;
+            Gmin = 10^(obj.omlsa_floor_db / 20);
+
+            obj.pf_S = a_s * obj.pf_S + (1 - a_s) * p;
+            obj.pf_minbuf(:, obj.pf_bptr) = obj.pf_S;
+            obj.pf_bptr = obj.pf_bptr + 1;
+            if obj.pf_bptr > size(obj.pf_minbuf, 2), obj.pf_bptr = 1; end
+            Smin  = min(obj.pf_minbuf, [], 2);
+
+            Sr    = obj.pf_S ./ max(Smin, 1e-12);
+            ppres = min(max((Sr - 1.0) / 8.0, 0), 1);
+
+            obj.pf_lam = max(obj.pf_lam + (1 - ppres) .* ...
+                             (a_d * obj.pf_lam + (1 - a_d) * p - obj.pf_lam), 1e-12);
+
+            gamma = p ./ obj.pf_lam;
+            xi    = max(a_dd * (obj.pf_Gp.^2) .* obj.pf_gam_p + ...
+                        (1 - a_dd) * max(gamma - 1, 0), 1e-3);
+            nu    = min(max(xi ./ (1 + xi) .* gamma, 1e-6), 500);
+            G_lsa = xi ./ (1 + xi) .* exp(0.5 * expint(nu));
+            G     = min(max((G_lsa .^ ppres) .* (Gmin .^ (1 - ppres)), Gmin), 1.0);
+
+            Yf            = G .* Yf;
+            obj.pf_Gp     = G;
+            obj.pf_gam_p  = gamma;
+        end
     end
 end
 
@@ -326,9 +435,9 @@ function v = field_or_(s, name, default_val)
 end
 
 function validate_method_(m)
-    if ~ismember(m, {'gev', 'mwf', 'mvdr', 'rank1'})
+    if ~ismember(m, {'gev', 'mwf', 'mvdr', 'rank1', 'rankn'})
         error('mwf:bad_method', ...
-              'cfg.mwf.method must be one of: gev | mwf | mvdr | rank1 (got "%s").', m);
+              'cfg.mwf.method must be one of: gev | mwf | mvdr | rank1 | rankn (got "%s").', m);
     end
 end
 

@@ -908,8 +908,9 @@ classdef SimulatorUI < handle
         function [disp_names, keys] = mwf_method_choices_(~)
         %MWF_METHOD_CHOICES_  Display labels and canonical cfg.mwf.method
         %   keys for the algorithm selector, kept in matching order.
-            disp_names = {'GEV (Max-SNR)', 'SDW-MWF', 'MVDR', 'Rank-1 (2/3-mic)'};
-            keys       = {'gev',           'mwf',     'mvdr', 'rank1'};
+            disp_names = {'GEV (Max-SNR)', 'SDW-MWF', 'MVDR', ...
+                          'Rank-1 (2/3-mic)', 'Rank-N + OMLSA'};
+            keys       = {'gev', 'mwf', 'mvdr', 'rank1', 'rankn'};
         end
 
         function cb_mwf_method_(obj, src)
@@ -920,8 +921,18 @@ classdef SimulatorUI < handle
             key = keys{src.Value};
             obj.mwf.method  = key;          % mwf reads obj.method per block
             obj.Cfg.mwf.method = key;       % keep config in sync
-            obj.set_status_warning_(sprintf('MWF algorithm: %s', upper(key)));
-            fprintf('[Q-WiSE] MWF algorithm set to "%s".\n', key);
+            % Rank-N ships with the OMLSA near-zero denoiser enabled; other
+            % methods follow whatever the config requested.
+            if strcmp(key, 'rankn')
+                obj.mwf.post_omlsa = true;
+            elseif isfield(obj.Cfg, 'mwf') && isfield(obj.Cfg.mwf, 'post_omlsa')
+                obj.mwf.post_omlsa = logical(obj.Cfg.mwf.post_omlsa);
+            end
+            omlsa_lbl = 'off';
+            if obj.mwf.post_omlsa, omlsa_lbl = 'on'; end
+            obj.set_status_warning_(sprintf('MWF algorithm: %s (OMLSA %s)', ...
+                                            upper(key), omlsa_lbl));
+            fprintf('[Q-WiSE] MWF algorithm set to "%s" (OMLSA %s).\n', key, omlsa_lbl);
         end
 
         function set_button_state_(~, btn, on, base_label, on_color)

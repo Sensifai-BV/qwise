@@ -82,6 +82,13 @@ function cfg = default()
     %                                   inverse (Sherman-Morrison). Tailored to
     %                                   2- and 3-mic arrays; falls back to a
     %                                   regularized solve for other mic counts.
+    %                         'rankn'— N-microphone rank-1 SDW-MWF for ANY
+    %                                   N >= 2. eig/inverse-free (power
+    %                                   iteration + conjugate gradient), so it
+    %                                   is ONNX-exportable. mu = 1 &
+    %                                   power_iters = 0 reproduce 'rank1' for
+    %                                   N = 2,3. Pair with post_omlsa for
+    %                                   near-zero residual + high speech quality.
     %   Postfilter          : single-channel Wiener post-filter after
     %                                   beamforming (decision-directed,
     %                                   frequency-smoothed)
@@ -106,6 +113,24 @@ function cfg = default()
     cfg.mwf.mask_threshold    = 0.01;        % batch speech-mask RMS threshold
     cfg.mwf.mask_context      = 3;           % batch speech-mask context frames
     cfg.mwf.passthrough       = false;       % set true to bypass MWF (debug only)
+
+    % ---- rankn method (N-mic, ONNX-exportable) ----------------------
+    cfg.mwf.power_iters       = 2;           % rankn: power-iteration refine steps
+                                             %   (0 = exact rank-1 ref-column est.)
+    cfg.mwf.cg_iters          = cfg.n_mics;  % rankn: CG iters (>= n_mics is exact)
+
+    % ---- OMLSA near-zero residual post-suppressor -------------------
+    %   Continuous-noise-tracking log-spectral-amplitude suppressor applied
+    %   AFTER the beamformer (and after the Wiener post-filter, if any).
+    %   Clears low-frequency / tonal residual that a small array cannot null
+    %   spatially. Applies to both batch and streaming. Off by default to
+    %   preserve legacy behaviour; recommended ON with 'rankn'.
+    cfg.mwf.post_omlsa        = false;       % enable OMLSA suppressor
+    cfg.mwf.omlsa_floor_db    = -30;         % spectral floor (lower = more cut)
+    cfg.mwf.omlsa_alpha_dd    = 0.92;        % decision-directed a-priori-SNR EMA
+    cfg.mwf.omlsa_alpha_s     = 0.90;        % power-smoothing for noise tracking
+    cfg.mwf.omlsa_alpha_d     = 0.85;        % noise-PSD update rate
+    cfg.mwf.omlsa_win_min     = 60;          % minimum-statistics window (frames)
 
     % ---------------- Recording --------------------------------------
     %   Mode is locked in at the moment the Record button is pressed:
