@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.python-version
+
+# Local test artefacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data — these live under /data inside the Docker image, never in git.
+recordings/
+data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

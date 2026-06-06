@@ -25,7 +25,9 @@ classdef mwf < handle
 %         cfg.mwf.passthrough is true.
 %
 %   Configuration (cfg.mwf):
-%     method            'gev' | 'mwf' | 'mvdr'
+%     method            'gev' | 'mwf' | 'mvdr' | 'rank1'
+%                       'rank1' = closed-form rank-1 MWF with the analytic
+%                       2x2 / 3x3 noise-covariance inverse (2- and 3-mic).
 %     ref_mic           1-based reference microphone index
 %     mu                SDW trade-off (used by 'mwf' only)
 %     eps_reg           numerical floor for regularization
@@ -273,6 +275,14 @@ classdef mwf < handle
                 case 'gev'
                     W = mwf_compute_gev_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
                                                 obj.eps_reg, obj.diag_load_ratio);
+                case 'rank1'
+                    % Closed-form rank-1 MWF (2-/3-mic analytic inverse).
+                    % diag_load_ratio is forced to 0 so the noise inverse is
+                    % the RAW analytic inverse, bit-exact to mwf_2mic/mwf_3mic.
+                    % (The kernel still falls back to pinv only if Phi_nn is
+                    % genuinely singular — the case the standalone code errors on.)
+                    W = mwf_compute_rank1_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
+                                                  obj.eps_reg, 0);
                 otherwise
                     W = mwf_compute_mwf_weights(Phi_ss, Phi_nn, obj.ref_mic, ...
                                                 obj.mu, obj.eps_reg, obj.diag_load_ratio);
@@ -316,9 +326,9 @@ function v = field_or_(s, name, default_val)
 end
 
 function validate_method_(m)
-    if ~ismember(m, {'gev', 'mwf', 'mvdr'})
+    if ~ismember(m, {'gev', 'mwf', 'mvdr', 'rank1'})
         error('mwf:bad_method', ...
-              'cfg.mwf.method must be one of: gev | mwf | mvdr (got "%s").', m);
+              'cfg.mwf.method must be one of: gev | mwf | mvdr | rank1 (got "%s").', m);
     end
 end
 

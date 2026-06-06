@@ -77,13 +77,18 @@ function cfg = default()
     %                                   reference Python pipeline)
     %                         'mwf'  — Speech-Distortion-Weighted MWF
     %                         'mvdr' — MVDR with eigenvector steering
+    %                         'rank1'— Closed-form rank-1 MWF using the exact
+    %                                   analytic 2x2 / 3x3 noise-covariance
+    %                                   inverse (Sherman-Morrison). Tailored to
+    %                                   2- and 3-mic arrays; falls back to a
+    %                                   regularized solve for other mic counts.
     %   Postfilter          : single-channel Wiener post-filter after
     %                                   beamforming (decision-directed,
     %                                   frequency-smoothed)
     %   Mask params (batch) : threshold + context frames driving the
     %                                   speech mask built from VAD audio
     cfg.mwf.enabled           = true;
-    cfg.mwf.method            = 'gev';       % 'gev' | 'mwf' | 'mvdr'
+    cfg.mwf.method            = 'gev';       % 'gev' | 'mwf' | 'mvdr' | 'rank1'
     cfg.mwf.n_fft             = 1024;        % batch-mode STFT size  (matches Python)
     cfg.mwf.hop               = 256;         % batch-mode STFT hop   (matches Python)
     cfg.mwf.stft_win          = 512;         % streaming STFT window

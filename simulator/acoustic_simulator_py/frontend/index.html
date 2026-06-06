@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <title>Q-WiSE — Acoustic Simulator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description"
+        content="Q-WiSE neural-guided MWF speech-enhancement demo." />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <!-- Plotly.js — used by /static/plots.js (Task 17) to draw the 3D
+       scene, spectrograms, waveforms and VAD trace. Loaded async so a
+       blocked / offline CDN doesn't break the page; plots fall back to
+       their placeholder text in that case. SRI hash matches Plotly's
+       canonical 2.35.2 bundle (sha384 verified against the CDN). -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"
+          integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
+          crossorigin="anonymous" async></script>
+</head>
+<body>
+  <!--
+    Task 14 ships only the LAYOUT skeleton — empty containers wired up
+    with hamburger / source toggle / accordion stubs. Later tasks fill
+    each region in:
+      * Task 15: sidebar accordion bound to /api/config/schema
+      * Task 16: browser audio capture + WAV upload
+      * Task 17: Plotly plots (scene, spectrograms, waveforms, VAD)
+      * Task 18: Recording session controls + playback grid
+      * Task 19: client-side session tracking (localStorage + cookie)
+  -->
+  <div class="app" data-sidebar="open" id="app">
+    <!-- ================================================================
+         TOP BAR
+         ================================================================ -->
+    <header class="topbar">
+      <div class="brand">
+        <a class="logo" href="/" aria-label="Q-WiSE home">
+          <!-- Stylised triangular-mesh mark (matches the project logo).
+               Pure SVG so it scales for retina + dark backgrounds. -->
+          <svg viewBox="0 0 64 64" width="36" height="36" aria-hidden="true">
+            <circle cx="32" cy="32" r="28" fill="none"
+                    stroke="var(--accent)" stroke-width="4" />
+            <g fill="none" stroke="var(--bg)" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 42 L32 22 L42 42 Z" />
+              <path d="M22 42 L42 42" />
+              <path d="M27 32 L37 32" />
+              <path d="M32 22 L32 42" />
+            </g>
+            <g fill="var(--bg)">
+              <circle cx="22" cy="42" r="2.6" />
+              <circle cx="32" cy="22" r="2.6" />
+              <circle cx="42" cy="42" r="2.6" />
+              <circle cx="27" cy="32" r="2.2" />
+              <circle cx="37" cy="32" r="2.2" />
+              <circle cx="32" cy="42" r="2.2" />
+            </g>
+          </svg>
+        </a>
+        <div class="wordmark">
+          <span class="brand-title">Q-WiSE</span>
+          <span class="brand-tagline">Acoustic Simulator — live demo</span>
+        </div>
+      </div>
+
+      <div class="actions" role="group" aria-label="Capture controls">
+        <button class="btn btn-primary" id="btn-capture" type="button"
+                aria-pressed="false">
+          <span class="dot dot-dark"></span>
+          <span class="btn-label">Start Capture</span>
+        </button>
+
+        <div class="segmented" id="source-toggle"
+             role="radiogroup" aria-label="Speech source">
+          <button class="seg-item is-active" data-source="mic"
+                  role="radio" aria-checked="true" type="button">Mic</button>
+          <button class="seg-item" data-source="wav"
+                  role="radio" aria-checked="false" type="button">WAV</button>
+        </div>
+
+        <button class="btn btn-ghost" id="btn-browse-wav" type="button"
+                title="Choose clean-speech WAV (Task 16)" disabled>
+          WAV&hellip;
+        </button>
+      </div>
+
+      <div class="topbar-right">
+        <span class="status-pill" id="status-pill" aria-live="polite">
+          <span class="dot"></span><span class="status-label">Idle</span>
+        </span>
+        <button class="hamburger" id="btn-hamburger" type="button"
+                aria-label="Toggle sidebar" aria-expanded="true">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ================================================================
+         MAIN CANVAS — plot grid (filled by Task 17)
+         ================================================================ -->
+    <main class="canvas" aria-label="Live plots">
+      <section class="plot-grid">
+        <!-- Row 1: 3-D scene + two spectrograms -->
+        <article class="card scene-card" id="card-scene">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3>Acoustic Scene</h3>
+          </header>
+          <div class="card-body card-placeholder">loading 3-D scene&hellip;</div>
+        </article>
+        <article class="card spec-card" id="card-spec-noisy">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3>Spectrogram — Noisy Composite</h3>
+          </header>
+          <div class="card-body card-placeholder">loading spectrogram&hellip;</div>
+        </article>
+        <article class="card spec-card" id="card-spec-mwf">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3>Spectrogram — MWF Enhanced</h3>
+          </header>
+          <div class="card-body card-placeholder">loading spectrogram&hellip;</div>
+        </article>
+
+        <!-- Row 2: per-mic waveforms (placeholder rows; resized at runtime) -->
+        <article class="card mic-card" id="card-mic-array">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3 id="mic-array-title">Physical N-Mic Array</h3>
+            <span class="card-sub" id="mic-array-sub">
+              every mic receives speech + drone + env (TDOA + 1/r gain)
+            </span>
+          </header>
+          <div class="card-body" id="mic-rows"></div>
+        </article>
+
+        <!-- Row 3: MWF output wave + VAD trace -->
+        <article class="card wave-card" id="card-mwf-wave">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3>MWF Enhanced Output</h3>
+          </header>
+          <div class="card-body card-placeholder">loading waveform&hellip;</div>
+        </article>
+        <article class="card vad-card" id="card-vad-trace">
+          <header class="card-head">
+            <span class="rule"></span>
+            <h3>VAD Trace</h3>
+            <span class="card-sub" id="vad-backend-sub">backend: —</span>
+          </header>
+          <div class="card-body card-placeholder">loading VAD trace&hellip;</div>
+        </article>
+      </section>
+    </main>
+
+    <!-- ================================================================
+         RIGHT SIDEBAR — accordion (data binding in Task 15)
+         ================================================================ -->
+    <aside class="sidebar" id="sidebar" aria-label="Configuration">
+      <header class="sidebar-head">
+        <span class="sidebar-icon" aria-hidden="true"></span>
+        <span class="sidebar-title">Configuration</span>
+        <span class="sidebar-badge">live</span>
+      </header>
+      <div class="sidebar-body" id="sidebar-body">
+        <p class="sidebar-loading">Loading config schema&hellip;</p>
+      </div>
+      <footer class="sidebar-foot">
+        Changes apply live to the running pipeline.
+      </footer>
+    </aside>
+
+    <!-- ================================================================
+         BOTTOM ACTION BAR — recording + playback (Task 18 wires)
+         ================================================================ -->
+    <footer class="bottombar">
+      <div class="bottom-left">
+        <button class="btn btn-record" id="btn-record" type="button"
+                aria-pressed="false" disabled
+                title="Recording controls land in Task 18">
+          <span class="dot dot-red"></span>
+          <span class="btn-label">Record</span>
+        </button>
+        <span class="record-hint" id="record-hint">
+          Start Capture first&hellip;
+        </span>
+      </div>
+      <div class="bottom-grid" id="playback-grid"
+           aria-label="Latest recording playback"></div>
+      <div class="bottom-right">
+        <span class="quota-info" id="quota-info"
+              aria-live="polite">quota: —</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

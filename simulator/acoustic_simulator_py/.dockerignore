@@ -1,0 +1,38 @@
+# Files that should never land inside the container image.
+# Keep this list narrow — anything *not* in here is part of the build.
+
+# Source-control + editor metadata
+.git
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+.DS_Store
+
+# Local Python / test artefacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime + ephemeral state — backend code creates these inside /data
+# at runtime, never copy a host-side version into the image.
+recordings/
+data/
+uploads/
+tests/
+
+# Docs that bloat the image but aren't needed at runtime.
+docs/
+*.log
+*.md
+!README.md
+
+# CI / build scripts that don't belong in the image.
+scripts/
+.github/

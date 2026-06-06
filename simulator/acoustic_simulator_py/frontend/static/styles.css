@@ -1,0 +1,610 @@
+/* =========================================================================
+   Q-WiSE Acoustic Simulator — dark theme + responsive grid
+
+   Tokens follow the project palette: pure-black canvas (#000000), a green
+   accent (#469e00) borrowed from the logo, and a muted-green text scale
+   so panels read calmly without screen glare.
+   ========================================================================= */
+
+:root {
+  /* Core palette */
+  --bg:           #000000;
+  --surface:      #0c0f0c;
+  --surface-alt:  #11150f;
+  --surface-2:    #161a13;
+  --border:       #1f2a16;
+  --border-soft:  #14180f;
+
+  /* Accent */
+  --accent:       #469e00;
+  --accent-soft:  #1b3308;
+  --accent-dim:   #2d6800;
+
+  /* Status colours */
+  --warn:         #e0a40c;
+  --danger:       #c54848;
+
+  /* Text */
+  --text-hi:      #f1f5ec;
+  --text-mid:     #a3b094;
+  --text-lo:      #5f6b56;
+
+  /* Layout sizes */
+  --topbar-h:     64px;
+  --bottombar-h:  72px;
+  --sidebar-w:    320px;
+  --sidebar-w-closed: 0px;
+  --radius:       8px;
+  --gap:          12px;
+
+  /* Type */
+  --font-stack:   -apple-system, BlinkMacSystemFont, "Inter", system-ui,
+                  "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --mono-stack:   "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-hi);
+  font-family: var(--font-stack);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+
+/* =========================================================================
+   App grid — topbar / canvas+sidebar / bottombar
+   ========================================================================= */
+.app {
+  display: grid;
+  grid-template-rows:
+    var(--topbar-h)
+    minmax(0, 1fr)
+    var(--bottombar-h);
+  grid-template-columns: 1fr var(--sidebar-w);
+  grid-template-areas:
+    "topbar topbar"
+    "canvas sidebar"
+    "bottombar bottombar";
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Sidebar collapse — driven by the data attribute on .app */
+.app[data-sidebar="closed"] {
+  grid-template-columns: 1fr var(--sidebar-w-closed);
+}
+.app[data-sidebar="closed"] .sidebar {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+.sidebar { transition: transform 220ms ease, opacity 220ms ease; }
+
+/* =========================================================================
+   Top bar
+   ========================================================================= */
+.topbar {
+  grid-area: topbar;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo  {
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); border-radius: var(--radius);
+  text-decoration: none;
+}
+.logo svg { display: block; }
+
+.wordmark { display: flex; flex-direction: column; line-height: 1.1; gap: 2px; }
+.brand-title   { font-weight: 700; color: var(--accent); font-size: 16px; }
+.brand-tagline { color: var(--text-mid); font-size: 11px; }
+
+/* Capture controls cluster */
+.actions {
+  display: flex; align-items: center; gap: 10px;
+  justify-self: center;
+}
+
+.topbar-right { display: flex; align-items: center; gap: 14px; }
+
+/* Status pill */
+.status-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--text-mid); font-weight: 500; font-size: 12px;
+}
+.status-pill .dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--text-mid);
+}
+.status-pill[data-state="capturing"] .dot { background: var(--accent); }
+.status-pill[data-state="error"]     .dot { background: var(--danger); }
+
+/* Hamburger */
+.hamburger {
+  width: 40px; height: 40px;
+  display: inline-flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-alt);
+  cursor: pointer;
+  padding: 0;
+}
+.hamburger span {
+  display: block; width: 18px; height: 2px; border-radius: 1px;
+  background: var(--text-hi);
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+.hamburger:hover { background: var(--surface-2); }
+.app[data-sidebar="closed"] .hamburger span:nth-child(1) {
+  transform: translateY(6px) rotate(45deg);
+}
+.app[data-sidebar="closed"] .hamburger span:nth-child(2) { opacity: 0; }
+.app[data-sidebar="closed"] .hamburger span:nth-child(3) {
+  transform: translateY(-6px) rotate(-45deg);
+}
+
+/* =========================================================================
+   Buttons + segmented
+   ========================================================================= */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text-hi);
+  font: 600 12px var(--font-stack);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, transform 80ms ease;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn[disabled],
+.btn[disabled]:hover {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: var(--surface-alt);
+  color: var(--text-lo);
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+}
+.btn-primary:hover { background: #57b400; }
+.btn-primary[aria-pressed="true"] {
+  background: var(--danger);
+  color: var(--text-hi);
+}
+.btn-primary[aria-pressed="true"]:hover { background: #d35858; }
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-mid);
+}
+.btn-ghost:hover { color: var(--text-hi); border-color: var(--accent-dim); }
+.btn-record {
+  background: var(--surface-alt);
+  border-color: var(--border);
+  color: var(--text-mid);
+}
+.btn-record[aria-pressed="true"] {
+  background: var(--danger);
+  color: var(--text-hi);
+}
+
+.dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.dot-dark { background: var(--bg); }
+.dot-red  { background: var(--danger); }
+
+.segmented {
+  display: inline-flex;
+  padding: 4px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.seg-item {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--text-mid);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font: 600 11px var(--font-stack);
+}
+.seg-item.is-active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* =========================================================================
+   Canvas / plot grid
+   ========================================================================= */
+.canvas {
+  grid-area: canvas;
+  overflow: hidden;
+  padding: var(--gap);
+}
+
+.plot-grid {
+  height: 100%;
+  display: grid;
+  gap: var(--gap);
+  /* Row 1 tall + column 1 wide so the 3-D Acoustic Scene reads as the
+     anchor of the canvas; spectrograms shrink a touch, mic-row stays
+     legible. */
+  grid-template-rows: 1.4fr 1.2fr 0.85fr;
+  grid-template-columns: 1.8fr 1fr 1fr;
+  grid-template-areas:
+    "scene  spec-n spec-m"
+    "mics   mics   mics"
+    "wave   wave   vad";
+}
+
+#card-scene       { grid-area: scene;  }
+#card-spec-noisy  { grid-area: spec-n; }
+#card-spec-mwf    { grid-area: spec-m; }
+#card-mic-array   { grid-area: mics;   }
+#card-mwf-wave    { grid-area: wave;   }
+#card-vad-trace   { grid-area: vad;    }
+
+/* =========================================================================
+   Cards
+   ========================================================================= */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.card-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.card-head h3 {
+  margin: 0;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--text-hi);
+}
+.card-head .rule {
+  display: inline-block; width: 3px; height: 12px;
+  background: var(--accent); border-radius: 2px;
+}
+.card-sub {
+  font-size: 10px; color: var(--text-mid); margin-left: auto;
+}
+.card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+}
+.card-placeholder {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-lo);
+  font-size: 11px;
+  background: var(--border-soft);
+  border-radius: 6px;
+  margin: 12px;
+  padding: 16px;
+}
+
+/* Mic rows */
+.mic-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.mic-row + .mic-row { border-top: 1px solid var(--border-soft); }
+.mic-tag {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font: 600 10px var(--font-stack);
+  background: var(--surface-alt);
+  color: var(--text-mid);
+}
+.mic-tag.is-ref {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.mic-wave {
+  height: 28px;
+  background: #060806;
+  border-radius: 4px;
+}
+
+/* =========================================================================
+   Sidebar
+   ========================================================================= */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.sidebar-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-icon {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: var(--accent-soft);
+  position: relative;
+}
+.sidebar-icon::after {
+  content: ""; position: absolute; inset: 0;
+  margin: auto; width: 8px; height: 8px; border-radius: 999px;
+  background: var(--accent);
+}
+.sidebar-title {
+  font-size: 12px; font-weight: 600;
+}
+.sidebar-badge {
+  margin-left: auto;
+  font-size: 10px; font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.sidebar-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: var(--border-soft);
+}
+.sidebar-loading {
+  padding: 24px 16px;
+  color: var(--text-lo);
+  font-size: 11px;
+  text-align: center;
+}
+.sidebar-foot {
+  padding: 10px 14px;
+  font-size: 10px;
+  color: var(--text-lo);
+  background: var(--surface);
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+
+/* Accordion skeleton — Task 15 fills the controls in. */
+.accordion {
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--border-soft);
+}
+.accordion-section {
+  background: var(--surface);
+}
+.accordion-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.accordion-head .acc-bar {
+  width: 3px; height: 14px; border-radius: 2px;
+  background: var(--border);
+}
+.accordion-section[data-open="true"] .accordion-head .acc-bar {
+  background: var(--accent);
+}
+.accordion-head .acc-title {
+  font-size: 12px; font-weight: 600;
+}
+.accordion-head .acc-toggle {
+  margin-left: auto; color: var(--text-mid); font-size: 14px;
+}
+.accordion-body {
+  display: none;
+  padding: 4px 0 10px;
+}
+.accordion-section[data-open="true"] .accordion-body {
+  display: block;
+}
+
+/* Field rows — Task 15 binds widgets to these */
+.field-row {
+  display: flex; flex-direction: column;
+  gap: 6px;
+  padding: 6px 14px;
+}
+.field-row .field-top {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px;
+}
+.field-row .field-label {
+  font-size: 11px; color: var(--text-mid); font-weight: 500;
+}
+.field-row .field-value {
+  font: 600 11px var(--mono-stack);
+  color: var(--text-hi);
+}
+.field-row input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  outline: none;
+}
+.field-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.field-row input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px; border: 0; border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.field-row select {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-hi);
+  font: 500 11px var(--font-stack);
+}
+.field-row .field-hint {
+  display: block;
+  margin-top: 2px;
+  padding: 4px 8px;
+  background: var(--surface-alt);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--warn);
+}
+.field-row[data-requires-reload="true"] input[type="range"] {
+  /* Visually flag that the slider's value differs from what the
+     running pipeline can apply without a page reload. */
+  opacity: 0.85;
+}
+
+/* WAV filename badge — sits next to the "WAV…" browse button. */
+.wav-name {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  height: 32px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  font: 500 11px var(--mono-stack);
+  color: var(--text-mid);
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wav-name:empty { display: none; }
+.wav-name[data-state="loading"] { border-color: var(--accent-dim); color: var(--text-hi); }
+.wav-name[data-state="loaded"]  { border-color: var(--accent);     color: var(--accent); }
+.wav-name[data-state="error"]   { border-color: var(--danger);     color: var(--danger); }
+
+/* =========================================================================
+   Playback grid — chips in the bottom bar, one per WAV in the latest session
+   ========================================================================= */
+.bottom-grid[data-empty="true"]::after {
+  content: "No recordings yet";
+  color: var(--text-lo);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.play-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text-hi);
+  font: 600 11px var(--font-stack);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.play-chip:hover { background: var(--surface-2); }
+.play-chip[data-state="playing"] {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--text-hi);
+}
+.play-chip .play-icon { width: 10px; text-align: center; }
+.play-chip .play-name { font-family: var(--mono-stack); font-weight: 700; }
+
+.quota-info[data-state="exhausted"] { color: var(--warn); }
+
+/* =========================================================================
+   Bottom bar
+   ========================================================================= */
+.bottombar {
+  grid-area: bottombar;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.bottom-left { display: flex; align-items: center; gap: 12px; }
+.record-hint { color: var(--text-lo); font-size: 11px; }
+.bottom-grid {
+  display: grid;
+  gap: 6px;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(60px, max-content);
+  overflow-x: auto;
+}
+.bottom-right { display: flex; align-items: center; gap: 12px; }
+.quota-info {
+  color: var(--text-mid); font-size: 11px;
+  font-family: var(--mono-stack);
+}
+
+/* =========================================================================
+   Responsive — collapse the sidebar by default on narrow screens
+   ========================================================================= */
+@media (max-width: 1024px) {
+  .app { grid-template-columns: 1fr var(--sidebar-w-closed); }
+  .sidebar { transform: translateX(100%); pointer-events: none; }
+  .app[data-sidebar="open"] { grid-template-columns: 1fr var(--sidebar-w); }
+  .app[data-sidebar="open"] .sidebar { transform: none; pointer-events: auto; }
+  .plot-grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "scene  scene"
+      "spec-n spec-m"
+      "mics   mics"
+      "wave   vad";
+  }
+}
+@media (max-width: 720px) {
+  .actions .segmented { display: none; }
+  .brand-tagline { display: none; }
+  .plot-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "scene"
+      "spec-n"
+      "spec-m"
+      "mics"
+      "wave"
+      "vad";
+  }
+}
