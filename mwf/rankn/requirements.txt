@@ -1,0 +1,7 @@
+numpy>=1.23
+scipy>=1.9
+soundfile>=0.12
+onnx>=1.15
+onnxruntime>=1.16
+spox>=0.12          # only needed to (re)build the ONNX models
+# sounddevice>=0.4  # optional, only for `demo.py --play`
