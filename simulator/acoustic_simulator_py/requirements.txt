@@ -12,5 +12,5 @@ numpy==1.26.4
 scipy==1.14.1
 soundfile==0.12.1
 onnxruntime==1.19.2
-python-multipart==0.0.12
+python-multipart==0.0.27
 anyio==4.6.0
