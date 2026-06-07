@@ -105,6 +105,11 @@ def main():
     ap.add_argument("--secs", type=float, default=20.0, help="sustained run length (s)")
     ap.add_argument("--tdp", type=float, default=None,
                     help="assumed board active power (W) for an estimate if no PMIC")
+    ap.add_argument("--realtime", action="store_true",
+                    help="pace inferences to 1x real-time and measure AVERAGE power "
+                         "(the deployment case); proves the amortized mW figure")
+    ap.add_argument("--threshold-mw", type=float, default=50.0,
+                    help="PASS/FAIL budget for the model's average power (mW)")
     args = ap.parse_args()
 
     import onnxruntime as ort
@@ -136,34 +141,64 @@ def main():
         time.sleep(0.5)
         s = PowerSampler(); s.start(); time.sleep(1.5); idle = s.stop()
 
+    # quick latency probe (max throughput) to get per-inference time
+    n, t0 = 0, time.perf_counter()
+    while time.perf_counter() - t0 < min(3.0, args.secs):
+        sess.run(outs, feeds); n += 1
+    lat = (time.perf_counter() - t0) / n
+    rtf = lat / dur
+
+    # measurement loop: real-time-paced (deployment) or back-to-back (throughput)
     sampler = PowerSampler() if has_pmic else None
     if sampler:
         sampler.start()
-    n, t0 = 0, time.perf_counter()
-    while time.perf_counter() - t0 < args.secs:
-        sess.run(outs, feeds)
-        n += 1
-    elapsed = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    if args.realtime:
+        # one inference per `dur` seconds of audio -> CPU idles between bursts
+        next_t = t0
+        while time.perf_counter() - t0 < args.secs:
+            sess.run(outs, feeds)
+            next_t += dur
+            sleep = next_t - time.perf_counter()
+            if sleep > 0:
+                time.sleep(sleep)
+    else:
+        while time.perf_counter() - t0 < args.secs:
+            sess.run(outs, feeds)
     busy = sampler.stop() if sampler else None
-
-    lat = elapsed / n
-    rtf = lat / dur
+    thr = args.threshold_mw
     print(f"\nmodel        : {os.path.basename(model)}  ({os.path.getsize(model)//1024} KB)")
-    print(f"audio/infer  : {dur:.1f}s   inferences: {n}")
+    print(f"audio/infer  : {dur:.1f}s")
     print(f"latency      : {lat*1000:.1f} ms/inference")
     print(f"real-time    : RTF {rtf:.4f}  ({1/rtf:.0f}x faster than real-time)")
+    print(f"mode         : {'REAL-TIME paced (deployment)' if args.realtime else 'max throughput'}")
+
     if busy is not None and len(busy):
-        pb, pi = float(busy.mean()), float(idle.mean()) if idle is not None else 0.0
-        print(f"power (PMIC) : idle {pi:.2f} W   busy {pb:.2f} W   delta {pb-pi:.2f} W")
-        print(f"energy       : {pb*lat:.3f} J/inference   {pb*rtf:.3f} J per second of audio")
-        print(f"              (incremental over idle: {(pb-pi)*lat:.3f} J/inference)")
+        pb = float(busy.mean())
+        pi = float(idle.mean()) if idle is not None else 0.0
+        print(f"power (PMIC) : idle {pi:.2f} W   running(avg) {pb:.2f} W")
+        if args.realtime:
+            p_model_mw = (pb - pi) * 1000.0    # measured average attributable power
+            print(f"MODEL POWER  : {p_model_mw:.1f} mW  (avg over real-time operation, "
+                  f"measured = running - idle)")
+            print(f"verdict      : {'PASS' if p_model_mw < thr else 'FAIL'} "
+                  f"(< {thr:.0f} mW budget)")
+        else:
+            print(f"NOTE: max-throughput pegs the CPU; for the deployment figure "
+                  f"re-run with --realtime.")
+            print(f"amortized    : RTF x (busy-idle) = {(pb-pi)*rtf*1000:.1f} mW average")
     else:
-        print("power        : no PMIC telemetry (not a Pi 5).")
-        if args.tdp:
-            print(f"estimate     : @ {args.tdp:.1f} W active -> "
-                  f"{args.tdp*lat:.3f} J/inference, {args.tdp*rtf:.3f} J/s-audio")
-        print("              For a real figure use an inline USB power meter:")
-        print("              Energy = (P_busy - P_idle) [W] x latency [s].")
+        # no on-board telemetry: bound the average power from RTF
+        print("power        : no PMIC telemetry (not a Pi 5) -> using a power bound.")
+        p_bound = args.tdp if args.tdp else 10.0
+        p_model_mw = rtf * p_bound * 1000.0    # RTF x board power upper bound
+        tag = "assumed" if args.tdp else "generous upper bound"
+        print(f"MODEL POWER  : <= {p_model_mw:.1f} mW  (RTF x {p_bound:.1f} W board, {tag})")
+        print(f"verdict      : {'PASS' if p_model_mw < thr else 'FAIL'} "
+              f"(< {thr:.0f} mW budget)")
+        print("              For a MEASURED value: Pi 5 reads it automatically; on a")
+        print("              Pi 4 log an inline USB power meter and compute")
+        print("              P_model = (P_running_realtime - P_idle).")
 
 
 if __name__ == "__main__":
