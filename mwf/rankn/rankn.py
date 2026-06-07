@@ -68,6 +68,11 @@ class RankNConfig:
     # energy VAD
     vad_speech_pct: float = 60.0   # frames above this energy pct -> speech
     vad_noise_pct: float = 35.0    # frames below this energy pct -> noise
+    # VAD output gate (silence non-speech regions after OMLSA)
+    vad_gate: bool = True
+    gate_thr: float = 0.5          # speech-probability threshold
+    gate_hangover_s: float = 0.2   # extend speech regions by this much
+    gate_floor: float = 0.0        # non-speech level (0 = full silence)
 
 
 def config_for(fs: int) -> RankNConfig:
