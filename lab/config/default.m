@@ -58,6 +58,16 @@ function cfg = default()
     cfg.env_gain_init   = 0.03;          % environment mix level
     cfg.gain_max        = 0.30;          % UI slider upper bound for both
 
+    % Speech distance falloff. The drone sits ON the array (fixed level),
+    % so a steep speech falloff buries the talker at distance. This
+    % exponent sets how much the speech quietens with range:
+    %   0   -> constant level (no distance effect)
+    %   0.5 -> gentle (~4 dB across 1..2.5 m)
+    %   1   -> full physical 1/r: gain 1.00/0.67/0.50/0.40/0.25 at
+    %          1/1.5/2/2.5/4 m  (~0/-3.5/-6/-8/-12 dB ladder)
+    % Inter-mic gain ratios and TDOAs are preserved regardless.
+    cfg.speech_dist_exponent = 1.0;
+
     % ---------------- ONNX enhancer ----------------------------------
     cfg.onnx_path       = fullfile(proj, 'onnx', 'qwise.onnx');
 
@@ -67,11 +77,11 @@ function cfg = default()
     %   -90 = right (looking down the +x axis from the mouth).
     cfg.presets = struct( ...
         'name',        {'Drone 1m · center', 'Drone 1.5m · left', ...
-                        'Drone 2m · right',  'Drone 2.5m · center'}, ...
-        'human_h',     {1.63, 1.81, 1.90, 1.75}, ...
-        'slant_dist',  {1.00, 1.5, 2.00, 2.50}, ...
-        'drone_az',    {0,    90,   -90,  0}, ...
-        'env_dist',    {4.0,  6.0,  3.0,  7.0});
+                        'Drone 2m · right',  'Drone 2.5m · center', 'Drone 4m · center'}, ...
+        'human_h',     {1.63, 1.81, 1.90, 1.75, 1.75}, ...
+        'slant_dist',  {1.00, 1.5, 2.00, 2.50, 4.0}, ...
+        'drone_az',    {0,    90,   -90,  0, 0}, ...
+        'env_dist',    {4.0,  6.0,  3.0,  7.0, 8.0});
     cfg.preset_default = 1;
 
     % ---------------- Recording --------------------------------------

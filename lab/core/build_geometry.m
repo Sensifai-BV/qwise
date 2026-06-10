@@ -56,9 +56,21 @@ function geo = build_geometry(cfg)
     [delays_env,         frac_delays_env   ] = samp_delays_(d_env,    c, cfg.fs);
 
     % --- Per-source 1/r spreading gain (clamped at d_ref) -------------
-    gains_speech = d_ref ./ max(d_speech, d_ref);
     gains_drone  = d_ref ./ max(d_drone,  d_ref);
     gains_env    = d_ref ./ max(d_env,    d_ref);
+
+    % Speech gain with a tunable distance falloff. The pure physical 1/r
+    % law (exponent 1) drops the talker to 0.5 at 2 m / 0.4 at 2.5 m, which
+    % — against the fixed-level drone sitting ON the array — buries the
+    % speech past ~1.5 m. A gentler exponent keeps the talker quieter with
+    % distance (2 m and 2.5 m lower than 1 m and 1.5 m) without collapsing
+    % it. cfg.speech_dist_exponent in [0, 1]:
+    %     0   -> constant level (no distance effect)
+    %     0.5 -> gentle falloff   (default: 1.0/0.84/0.71/0.63 at 1/1.5/2/2.5 m)
+    %     1   -> full physical 1/r
+    %   Inter-mic gain ratios and all TDOAs are preserved either way.
+    alpha = speech_dist_exponent_(cfg);
+    gains_speech = (d_ref ./ max(d_speech, d_ref)) .^ alpha;
 
     % --- Legacy aliases -----------------------------------------------
     delays = delays_speech;            % singular, speech-centric (legacy)
@@ -88,6 +100,17 @@ function geo = build_geometry(cfg)
     geo.gains_env         = gains_env;
     geo.grazing_deg       = rad2deg(asin(mh ./ d_img));
     geo.distance_ref      = d_ref;
+end
+
+% --------------------------------------------------------------------
+function a = speech_dist_exponent_(cfg)
+%SPEECH_DIST_EXPONENT_  Distance-falloff exponent for the speech gain
+%   (default 0.5). 0 = constant level, 1 = physical 1/r. Clamped to [0,1].
+    a = 0.5;
+    if isfield(cfg, 'speech_dist_exponent') && ~isempty(cfg.speech_dist_exponent)
+        a = cfg.speech_dist_exponent;
+    end
+    a = max(0, min(1, a));
 end
 
 % --------------------------------------------------------------------

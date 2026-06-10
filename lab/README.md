@@ -69,6 +69,7 @@ MATLAB.)
 |---|---|
 | **Speech sample** | Pick a `.wav` from `samples/speech/`; **Listen** plays the raw clean sample. |
 | **Scene preset** | Radio buttons: drone 1 m center / 1 m left / 1 m right / 3 m center (talker 170 cm, env 8 m). Changing it moves the drone in the 3-D scene and re-mixes. |
+| **Microphone array** | Number of mics (2–5) and inter-mic spacing (10 / 20 / 30 cm). Rebuilds the array, the per-mic waveform rows, and the 3-D scene. The ONNX accepts any mic count (`mic[M, L]`). |
 | **Noise mix** | Drone-fan and environment gain sliders. The defaults sit at a recoverable SNR; the cap keeps you in a range the model can still clean. |
 | **Play Mixed** | Plays the noisy mix with live per-mic waveforms + noisy spectrogram. |
 | **Clean (ONNX)** | Runs `qwise.onnx`, plays the enhanced speech, draws the noisy-vs-clean overlay + live clean spectrogram, and records the run. Press again to restart playback. |

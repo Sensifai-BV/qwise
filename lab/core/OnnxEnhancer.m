@@ -65,6 +65,8 @@ classdef OnnxEnhancer < handle
             end
             obj.ensure_helper_();
             [L, N] = size(mic);
+            fprintf('[Q-WiSE] ONNX enhance: sending %d mic channel(s) x %d samples\n', ...
+                    N, L);
 
             % Column-major flatten (MATLAB mic(:)); the helper reshapes it
             % back with order='F' and transposes to [M, L].
