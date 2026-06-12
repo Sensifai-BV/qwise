@@ -3,6 +3,8 @@
 Q-WiSE yields ultra-low-power, privacy-preserving speech enhancement ONNX with below 50 mW energy consumption,
 deployable on micro-edge platforms such as STM32, ESP32, and Nordic nRF53.
 
+![Lab](docs/imgs/lab.jpg)
+
 ## Requirements
 
 Install dependencies:
