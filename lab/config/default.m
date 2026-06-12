@@ -71,6 +71,14 @@ function cfg = default()
     % ---------------- ONNX enhancer ----------------------------------
     cfg.onnx_path       = fullfile(proj, 'onnx', 'qwise.onnx');
 
+    % ---------------- Energy meter (macOS / Linux only) --------------
+    %   Estimates model power during the Clean inference using the
+    %   run_demo.py algorithm: a measured figure when available
+    %   (Intel-RAPL, Linux) else the conservative RTF x board-power upper
+    %   bound. Shown as a mW bar under the enhanced-output waveform.
+    cfg.energy.board_w      = 7.0;       % assumed board TDP for the bound [W]
+    cfg.energy.threshold_mw = 50.0;      % power budget on the meter [mW]
+
     % ---------------- Scene presets (radio buttons) ------------------
     %   Each preset overrides human height, drone slant + azimuth, and the
     %   environment distance. Azimuth convention: 0 = center, +90 = left,

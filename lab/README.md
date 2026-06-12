@@ -74,6 +74,7 @@ MATLAB.)
 | **Play Mixed** | Plays the noisy mix with live per-mic waveforms + noisy spectrogram. |
 | **Clean (ONNX)** | Runs `qwise.onnx`, plays the enhanced speech, draws the noisy-vs-clean overlay + live clean spectrogram, and records the run. Press again to restart playback. |
 | **Latest recording** | Plays back the captured `mic1 … micN` and `clean` WAVs. |
+| **Energy meter** | Under the enhanced-output waveform (macOS / Linux only): a mW bar vs the 50 mW budget, estimated during the Clean inference (measured Intel-RAPL when available, else the RTF × board-power upper bound). |
 
 ## Configuration
 

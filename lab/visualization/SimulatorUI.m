@@ -54,6 +54,11 @@ classdef SimulatorUI < handle
         rx_ = 0
         rw_ = 0
 
+        % --- energy meter (macOS / Linux only) ---
+        energy_on_     = false
+        energy_board_w_ = 7.0
+        energy_thr_mw_  = 50.0
+
         % --- latest-recording playback ---
         playback_panel_
         playback_player_     = []
@@ -73,6 +78,13 @@ classdef SimulatorUI < handle
             obj.drone_gain = cfg.drone_gain_init;
             obj.env_gain   = cfg.env_gain_init;
             obj.spec_ncols = cfg.ui.spec_ncols;
+
+            % Energy meter only on macOS / Linux (per the OS power sources).
+            obj.energy_on_ = ismac || (isunix && ~ispc);
+            if isfield(cfg, 'energy')
+                if isfield(cfg.energy, 'board_w'),      obj.energy_board_w_ = cfg.energy.board_w; end
+                if isfield(cfg.energy, 'threshold_mw'), obj.energy_thr_mw_  = cfg.energy.threshold_mw; end
+            end
 
             nb = cfg.frame_size/2 + 1;
             obj.spec_mix_   = zeros(nb, obj.spec_ncols);
@@ -340,7 +352,13 @@ classdef SimulatorUI < handle
             obj.build_wave_rows_();
 
             % -------- Row 3 : clean output waveform --------
-            row3_y = 0.060;  row3_h = 0.150;
+            % Leave a strip under the clean waveform for the energy meter
+            % (macOS / Linux only); otherwise the waveform uses the space.
+            if obj.energy_on_
+                row3_y = 0.092;  row3_h = 0.120;
+            else
+                row3_y = 0.060;  row3_h = 0.150;
+            end
             obj.H.ax_clean_wave = axes(obj.fig, 'Units', 'normalized', ...
                 'Position', [rx row3_y rw row3_h], ...
                 'Color', [0.06 0.06 0.06], ...
@@ -350,7 +368,9 @@ classdef SimulatorUI < handle
             ylim(obj.H.ax_clean_wave, [-1.05 1.05]); xlim(obj.H.ax_clean_wave, [0 1]);
             ylabel(obj.H.ax_clean_wave, 'Amplitude', ...
                 'Color', [0.70 0.70 0.70], 'FontSize', 9);
-            xlabel(obj.H.ax_clean_wave, 'time (s)', 'Color', [0.50 0.50 0.50]);
+            if ~obj.energy_on_
+                xlabel(obj.H.ax_clean_wave, 'time (s)', 'Color', [0.50 0.50 0.50]);
+            end
             title(obj.H.ax_clean_wave, ...
                 'ONNX Enhanced Output  (gray = noisy mic 1, green = clean)', ...
                 'Color', 'w', 'FontSize', 9, 'FontWeight', 'bold');
@@ -369,6 +389,11 @@ classdef SimulatorUI < handle
                 'EdgeColor', [0.30 0.30 0.30], 'FontSize', 7, ...
                 'Location', 'northeast');
 
+            % Energy meter gauge (macOS / Linux only).
+            if obj.energy_on_
+                obj.build_energy_gauge_(rx, rw);
+            end
+
             draw_scene(obj.H.ax_scene, obj.geo, cfg);
         end
 
@@ -376,6 +401,50 @@ classdef SimulatorUI < handle
             uicontrol(parent, 'Style', 'text', 'String', '', ...
                 'BackgroundColor', [0.32 0.32 0.32], ...
                 'Units', 'normalized', 'Position', [0.03 y 0.94 0.003]);
+        end
+
+        function build_energy_gauge_(obj, rx, rw)
+        %BUILD_ENERGY_GAUGE_  Draw the static parts of the power gauge: a
+        %   dark track, a green "within budget" zone, a red "over budget"
+        %   zone, the budget marker, and placeholder fill + value text that
+        %   update_energy_ fills in after each Clean inference.
+            thr  = obj.energy_thr_mw_;
+            xmax = thr * 1.4;                       % a little headroom past budget
+            ax = axes(obj.fig, 'Units', 'normalized', ...
+                'Position', [rx 0.022 rw 0.052], ...
+                'Color', [0.09 0.09 0.09]);
+            hold(ax, 'on');
+            set(ax, 'XLim', [0 xmax], 'YLim', [0 1], 'YTick', [], ...
+                'Box', 'off', 'Layer', 'top', 'TickDir', 'out', ...
+                'XColor', [0.55 0.55 0.55], 'FontSize', 7, ...
+                'XTick', [0 round(thr/2) thr xmax]);
+            ax.YColor = 'none';
+            obj.H.ax_energy = ax;
+
+            yb = [0.30 0.30 0.70 0.70];
+            % within-budget zone (subtle green) + over-budget zone (subtle red)
+            patch(ax, [0 thr thr 0], yb, [0.12 0.22 0.14], 'EdgeColor', 'none');
+            patch(ax, [thr xmax xmax thr], yb, [0.24 0.13 0.12], 'EdgeColor', 'none');
+
+            % fill bar (updated per run)
+            obj.H.h_energy_fill = patch(ax, [0 0 0 0], [0.32 0.32 0.68 0.68], ...
+                [0.20 0.80 0.40], 'EdgeColor', 'none');
+
+            % budget marker
+            plot(ax, [thr thr], [0.10 0.92], '--', ...
+                'Color', [0.95 0.85 0.30], 'LineWidth', 1.3);
+            text(ax, thr, 0.99, sprintf(' %.0f mW budget', thr), ...
+                'Color', [0.95 0.85 0.30], 'FontSize', 7, ...
+                'VerticalAlignment', 'top');
+
+            % left label + value/verdict text inside the strip
+            text(ax, xmax*0.012, 0.5, 'Model power ', ...
+                'Color', [0.70 0.70 0.70], 'FontSize', 7, ...
+                'HorizontalAlignment', 'left');
+            obj.H.h_energy_txt = text(ax, xmax*0.985, 0.5, ...
+                'press Clean to measure', ...
+                'Color', [0.85 0.85 0.85], 'FontSize', 9, 'FontWeight', 'bold', ...
+                'HorizontalAlignment', 'right');
         end
 
         function build_wave_rows_(obj)
@@ -672,7 +741,13 @@ classdef SimulatorUI < handle
                                     [0.95 0.85 0.40]);
                     drawnow;
                     try
-                        obj.clean_ = obj.enh.enhance(obj.mic_mix_);
+                        if obj.energy_on_
+                            [obj.clean_, einfo] = obj.enh.enhance_metered( ...
+                                obj.mic_mix_, obj.energy_board_w_, obj.energy_thr_mw_);
+                            obj.update_energy_(einfo);
+                        else
+                            obj.clean_ = obj.enh.enhance(obj.mic_mix_);
+                        end
                     catch ME
                         set(src, 'Value', 0);
                         obj.set_status_(sprintf('ONNX failed: %s', ME.message), ...
@@ -788,6 +863,30 @@ classdef SimulatorUI < handle
             ymax = max([1.0, max(abs(noisy)), max(abs(clean))]) * 1.05;
             ylim(obj.H.ax_clean_wave, [-ymax ymax]);
             set(obj.H.clean_playhead, 'XData', [0 0], 'YData', [-ymax ymax]);
+        end
+
+        function update_energy_(obj, info)
+        %UPDATE_ENERGY_  Drive the power gauge from the metrics returned by
+        %   OnnxEnhancer.enhance_metered.
+            if ~obj.energy_on_ || ~isfield(obj.H, 'h_energy_fill') || ...
+                    ~isvalid(obj.H.h_energy_fill)
+                return;
+            end
+            p    = info.power_mw;
+            thr  = info.threshold_mw;
+            xmax = obj.energy_thr_mw_ * 1.4;
+            xp   = max(0, min(p, xmax));
+
+            pass = p < thr;
+            if pass, col = [0.22 0.82 0.42]; verdict = 'PASS';
+            else,    col = [0.95 0.50 0.28]; verdict = 'FAIL'; end
+            set(obj.H.h_energy_fill, 'XData', [0 xp xp 0], 'FaceColor', col);
+
+            rtf_x = 0;
+            if info.rtf > 0, rtf_x = 1 / info.rtf; end
+            txt = sprintf('%.1f mW  %s   ·   %.0f%c real-time', ...
+                          p, verdict, rtf_x, char(215));   % 215 = multiplication sign
+            set(obj.H.h_energy_txt, 'String', txt, 'Color', [0.96 0.96 0.96]);
         end
 
         function [lo, hi] = win_bounds_(~, hi, N, L)
